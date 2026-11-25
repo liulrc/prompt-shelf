@@ -117,7 +117,7 @@
     const showFeature = builtin && state.category === '全部' && !state.query.trim();
     const shown = showFeature ? [...list.filter(t=>t.id !== 'project-reader'), ...list.filter(t=>t.id === 'project-reader')] : list;
     const title = builtin ? '附加库' : '我的模板';
-    const desc = builtin ? '按用途挑选提示词，填入自己的内容即可使用。' : '保存自己的固定短语，以及从附加库改写的模板。';
+    const desc = builtin ? '按用途挑选提示词，直接改写原文后即可使用。' : '保存自己的固定短语，以及从附加库改写的模板。';
     host.innerHTML = intro(title,desc,'<span class="intro-quantity"><b>'+records.length+'</b> 个模板 · <b>'+userCategories.length+'</b> 种用途</span>') + (showFeature ? feature():'') +
       `<div class="library-head"><div class="section-title"><h2>${state.query.trim() ? '搜索结果' : '浏览模板'}</h2><span class="count-pill">${shown.length}</span></div>
       <div class="filters" role="group" aria-label="按用途筛选">${choices.map(c=>'<button class="filter-btn'+(state.category === c ? ' active':'')+'" data-filter="'+escape(c)+'" aria-pressed="'+(state.category===c)+'">'+(c==='全部'?icon('grid',12):'')+escape(c)+'</button>').join('')}</div></div>` +
