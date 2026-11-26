@@ -24,6 +24,11 @@
     grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
     text:'<path d="M4 5h16M4 10h12M4 15h16M4 20h8"/>',
     eye:'<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="2.7"/>',
+    clipboard:'<rect x="4" y="5" width="16" height="16" rx="2"/><rect x="8" y="3" width="8" height="4" rx="1.4"/><path d="M8 12h8m-8 4h6"/>',
+    capture:'<path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4"/><rect x="7" y="8" width="10" height="8" rx="1.4"/>',
+    image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.4"/><path d="m3 17 6-6 4 4 3-3 5 5"/>',
+    download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',
+    pin:'<path d="m8 3 10 4-2 2-1 4 2 3-1 1-7-3-5-2 1-1 3-1 2-4zM10 14l-4 7"/>',
     close:'<path d="m5 5 14 14M19 5 5 19"/>'
   };
   function icon(name, size = 18) {
@@ -37,12 +42,71 @@
     '研究':['research','research'], '视频':['video','video'], '文案':['pen','copy'],
     '开发':['code','dev'], '办公':['briefcase','office']
   };
-  const areaNames = { builtin:'附加库', personal:'我的模板', history:'使用历史' };
+  const areaNames = { builtin:'附加库', personal:'我的模板', history:'使用历史', clipboard:'剪贴板', capture:'截图工具' };
   const order = ['全部','视频','文案','研究','开发','办公'];
   const root = document.querySelector('#app');
   const state = {area:'builtin', category:'全部', query:'', editing:false};
   let lastFocus = '', noticeTimer;
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
+
+  const shelfKeys = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌥⇧V' : 'Alt+Shift+V';
+  const isTool = area => area === 'clipboard' || area === 'capture';
+  const assets = new Map();
+  let archive, disposeTool, closeShelf, openingShelf = false;
+
+  // Classic scripts also work when the user opens index.html directly from disk.
+  function loadAsset(file) {
+    if (!assets.has(file)) {
+      const style = file.endsWith('.css');
+      const node = document.createElement(style ? 'link' : 'script');
+      if (style) { node.rel = 'stylesheet'; node.href = 'prototype/' + file; }
+      else node.src = 'prototype/' + file;
+      assets.set(file, new Promise((resolve,reject) => {
+        node.onload = resolve;
+        node.onerror = () => {
+          assets.delete(file); node.remove();
+          reject(new Error('工具文件加载失败，请检查 prototype 文件夹是否完整。'));
+        };
+        document.head.append(node);
+      }));
+    }
+    return assets.get(file);
+  }
+  async function getArchive() {
+    if (!archive) {
+      await Promise.all([loadAsset('media.js'), loadAsset('assets/palette.js')]);
+      archive ??= window.createClipboardArchive(copy);
+    }
+    return archive;
+  }
+  async function openShelf() {
+    if (openingShelf || closeShelf || document.querySelector('dialog[open]')) return;
+    openingShelf = true;
+    try {
+      const [media] = await Promise.all([getArchive(), loadAsset('clipboard.css'), loadAsset('clipboard.js')]);
+      closeShelf = window.openClipboardShelf({icon,escape,notify,media,onClose() { closeShelf = null; }});
+    } catch (error) { notify(error.message); }
+    finally { openingShelf = false; }
+  }
+  async function trackPromptCopy(text) {
+    await copy(text);
+    try { await (await getArchive()).add({type:'text',text,source:'词匣 · 提示词'}); }
+    catch (error) { setTimeout(() => notify('提示词已复制。' + error.message), 300); }
+  }
+  async function mountTool(area, host) {
+    host.setAttribute('aria-busy','true');
+    try {
+      const [media] = await Promise.all([getArchive(), loadAsset(area+'.css'), loadAsset(area+'.js')]);
+      if (!host.isConnected) return;
+      const options = {host,icon,escape,notify,media,openShelf,onHistory:() => navigate('clipboard'),
+        saveToClipboardHistory:({blob,title}) => media.add({type:'image',blob,title,filename:title.replace(/\.png$/i,'')+'.png',source:'截图工具'})};
+      const cleanup = await (area === 'clipboard' ? window.openClipboardTool(options) : window.openCaptureTool(options));
+      if (host.isConnected) disposeTool = cleanup;
+      else if (typeof cleanup === 'function') cleanup();
+    } catch (error) {
+      if (host.isConnected) host.textContent = error.message;
+    } finally { host.removeAttribute('aria-busy'); }
+  }
 
   function notify(message) {
     clearTimeout(noticeTimer);
@@ -59,7 +123,7 @@
     const active = document.activeElement;
     field.value = text;
     field.style.cssText = 'position:fixed;left:0;top:0;opacity:0;pointer-events:none;';
-    document.body.append(field);
+    (document.querySelector('dialog[open]') || document.body).append(field);
     try {
       field.focus(); field.select(); field.setSelectionRange(0, field.value.length);
       if (!document.execCommand('copy')) throw new Error('剪贴板写入失败，请允许浏览器复制后重试。');
@@ -73,15 +137,18 @@
     return '<button class="nav-item' + (active ? ' active':'') + '" data-nav="' + area + '"' + (active ? ' aria-current="page"':'') + '>' + icon(symbol,17) + '<span>' + areaNames[area] + '</span>' + (count == null ? '' : '<span class="nav-count">' + count + '</span>') + '</button>';
   }
   function layout() {
+    if (typeof disposeTool === 'function') disposeTool();
+    disposeTool = null;
     root.innerHTML = `<div class="app-shell"><aside class="sidebar">
       <div class="brand"><img src="prototype/mark.svg" alt=""><div><div class="brand-name">词匣</div><small>PROMPT SHELF</small></div></div>
       <nav aria-label="工作台导航"><p class="nav-group">模板空间</p>
         ${navButton('builtin','library',catalog.length)}${navButton('personal','folder',store.listPersonal().length)}
         <p class="nav-group next">活动记录</p>${navButton('history','history',null)}
-      </nav><div class="side-foot"><span class="device">${icon('box',19)}</span><div><strong>本地工作区</strong><small>${store.persistent ? '离线可用' : '仅在本次会话中保留'}</small></div></div>
+        <p class="nav-group next">桌面工具</p>${navButton('clipboard','clipboard',null)}${navButton('capture','capture',null)}
+      </nav><button class="side-shelf" data-act="open-shelf" title="打开快捷历史栏">${icon('keyboard',16)} 历史栏 <kbd>${shelfKeys}</kbd></button><div class="side-foot"><span class="device">${icon('box',19)}</span><div><strong>本地工作区</strong><small>${store.persistent ? '离线可用' : '仅在本次会话中保留'}</small></div></div>
       </aside><div class="workspace"><header class="topbar">
         <div class="crumbs"><span class="crumb-home">工作台</span>${icon('chevron',11)}<b>${areaNames[state.area]}</b>${state.editing ? icon('chevron',11)+'<b>编辑器</b>':''}</div>
-        ${state.editing ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',15)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索当前模板库'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
+         ${state.editing || isTool(state.area) ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',15)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索当前模板库'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
       </header><main id="content" class="content"></main></div></div>`;
   }
   function categoryIcon(category) {
@@ -133,11 +200,13 @@
   }
   function drawContent() {
     const host = document.querySelector('#content');
+    if (isTool(state.area)) { mountTool(state.area, host); return; }
     if (state.area === 'history') listHistory(host); else listTemplates(host);
   }
   function navigate(area, reset=true) {
     Object.assign(state,{area,editing:false});
     if (reset) Object.assign(state,{query:'',category:'全部'});
+    try { history.replaceState(null, '', '#' + area); } catch { /* Some local WebViews restrict history writes. */ }
     layout(); drawContent(); window.scrollTo(0,0); document.title=areaNames[area]+' · 词匣';
   }
   let previousScroll=0;
@@ -153,7 +222,7 @@
       const buttons = Array.from(document.querySelectorAll('[data-open]'));
       (buttons.find(el=>el.dataset.open === lastFocus) || document.querySelector('[data-act="new"]'))?.focus({preventScroll:true});
     };
-    window.openPromptEditor({host:document.querySelector('#content'),record,origin,store,notify,copy,icon,escape,
+    window.openPromptEditor({host:document.querySelector('#content'),record,origin,store,notify,copy:trackPromptCopy,icon,escape,
       onCancel:returnToList,
       onFinish(action) {
         if (action === 'save') { navigate('personal'); notify(store.persistent ? '已保存到「我的模板」' : '已暂存到本次会话，关闭页面后可能丢失'); }
@@ -169,6 +238,7 @@
     if (!button || button.disabled) return;
     const {nav,filter,open,act,recopy}=button.dataset;
     if (nav) return navigate(nav);
+    if (act === 'open-shelf') return openShelf();
     if (filter !== undefined) { state.category=filter; drawContent(); Array.from(root.querySelectorAll('[data-filter]')).find(el=>el.dataset.filter===filter)?.focus({preventScroll:true}); return; }
     if (open) {
       const origin=state.area;
@@ -184,17 +254,27 @@
       if (!item) return;
       button.disabled=true;
       try {
-        await copy(item.text);
+        await trackPromptCopy(item.text);
       } catch (error) { notify(error.message); button.disabled=false; return; }
       try { store.recordUse(item); drawContent(); notify('已再次复制到剪贴板'); }
       catch { button.disabled=false; notify('已复制到剪贴板，历史记录写入失败'); }
     }
   });
   window.addEventListener('keydown',event=>{
-    if (!state.editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='k') {
+    if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.code === 'KeyV' || event.key.toLowerCase() === 'v')) {
+      event.preventDefault();
+      if (!event.repeat) openShelf();
+      return;
+    }
+    if (!state.editing && !isTool(state.area) && !document.querySelector('dialog[open]') && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='k') {
       event.preventDefault(); const field=document.querySelector('#search'); field.focus(); field.select();
     }
   });
-  window.addEventListener('storage',()=>{ if (!state.editing) { layout(); drawContent(); } });
-  navigate('builtin');
+  window.addEventListener('storage',()=>{ if (!state.editing && !isTool(state.area) && !closeShelf) { layout(); drawContent(); } });
+  function openLocation() {
+    const area = location.hash.slice(1);
+    navigate(Object.hasOwn(areaNames, area) ? area : 'builtin');
+  }
+  window.addEventListener('hashchange', openLocation);
+  openLocation();
 })();
