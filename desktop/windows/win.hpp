@@ -57,8 +57,8 @@ inline string to64(const Bytes &data) {
     if (data.empty())
         return {};
     DWORD n = 0;
-    CryptBinaryToStringA(data.data(), (DWORD)data.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr,
-                         &n);
+    CryptBinaryToStringA(data.data(), (DWORD)data.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+                         nullptr, &n);
     string out(n, 0);
     if (!CryptBinaryToStringA(data.data(), (DWORD)data.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
                               out.data(), &n))
@@ -68,10 +68,12 @@ inline string to64(const Bytes &data) {
 }
 inline Bytes from64(const string &s) {
     DWORD n = 0;
-    if (!CryptStringToBinaryA(s.data(), (DWORD)s.size(), CRYPT_STRING_BASE64, nullptr, &n, nullptr, nullptr))
+    if (!CryptStringToBinaryA(s.data(), (DWORD)s.size(), CRYPT_STRING_BASE64, nullptr, &n, nullptr,
+                              nullptr))
         throw std::runtime_error("文件数据无效。");
     Bytes b(n);
-    if (!CryptStringToBinaryA(s.data(), (DWORD)s.size(), CRYPT_STRING_BASE64, b.data(), &n, nullptr, nullptr))
+    if (!CryptStringToBinaryA(s.data(), (DWORD)s.size(), CRYPT_STRING_BASE64, b.data(), &n, nullptr,
+                              nullptr))
         throw std::runtime_error("文件数据无效。");
     return b;
 }
@@ -181,8 +183,7 @@ inline Bytes encodeFrame(Frame &f) {
     Gdiplus::Bitmap image(f.w, f.h, f.w * 4, PixelFormat32bppRGB, f.px.data());
     return encodeImage(image);
 }
-inline Frame decodeImage(const fs::path &p) {
-    Gdiplus::Bitmap image(p.c_str());
+inline Frame frameOf(Gdiplus::Bitmap &image) {
     UINT w = image.GetWidth(), h = image.GetHeight();
     require(image.GetLastStatus() == Gdiplus::Ok && w && h && (uint64_t)w * h <= 120000000,
             "此图片格式无法预览，或像素尺寸过大。");
@@ -195,6 +196,23 @@ inline Frame decodeImage(const fs::path &p) {
         memcpy(&frame.px[y * w * 4], (uint8_t *)bits.Scan0 + (ptrdiff_t)y * bits.Stride, w * 4);
     image.UnlockBits(&bits);
     return frame;
+}
+inline Frame decodeImage(const fs::path &path) {
+    Gdiplus::Bitmap image(path.c_str());
+    return frameOf(image);
+}
+inline Frame decodePng(const Bytes &bytes) {
+    require(!bytes.empty() && bytes.size() <= UINT_MAX, "PNG 内容为空或过大。");
+    IStream *s = nullptr;
+    require(SUCCEEDED(CreateStreamOnHGlobal(nullptr, TRUE, &s)), "无法读取 PNG。");
+    auto owner = std::unique_ptr<IStream, void (*)(IStream *)>(s, [](IStream *p) { p->Release(); });
+    ULONG written = 0;
+    require(SUCCEEDED(s->Write(bytes.data(), (ULONG)bytes.size(), &written)) && written == bytes.size(),
+            "无法读取 PNG。");
+    LARGE_INTEGER zero{};
+    require(SUCCEEDED(s->Seek(zero, STREAM_SEEK_SET, nullptr)), "无法读取 PNG。");
+    Gdiplus::Bitmap image(s);
+    return frameOf(image);
 }
 inline BITMAPINFO frameInfo(int w, int h) {
     BITMAPINFO b{};

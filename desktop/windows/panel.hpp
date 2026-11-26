@@ -40,7 +40,9 @@ inline bool trustedPage(const wstring &uri) {
     auto end = uri.find_first_of(L"?#");
     wstring base = uri.substr(0, end);
     return base == L"https://app.cixia.local/index.html" ||
-           base == L"https://app.cixia.local/desktop/ui/settings.html";
+           base == L"https://app.cixia.local/desktop/ui/settings.html" ||
+           base == L"https://app.cixia.local/desktop/ui/editor.html" ||
+           base == L"https://app.cixia.local/desktop/ui/gallery.html";
 }
 class Panel : public std::enable_shared_from_this<Panel> {
     ICoreWebView2Controller *controller = nullptr;
@@ -304,8 +306,8 @@ class Panel : public std::enable_shared_from_this<Panel> {
     Panel(string name, const fs::path &ui, const fs::path &data, const fs::path &media,
           std::function<std::pair<fs::path, string>(const wstring &)> resolver,
           std::function<void(Panel &, const Json &)> bridge, std::function<void(HWND)> close)
-        : resolveMedia(std::move(resolver)), distribution(ui), userData(data / L"WebView"), mediaPath(media),
-          dispatch(std::move(bridge)), closed(std::move(close)), kind(std::move(name)) {}
+        : resolveMedia(std::move(resolver)), distribution(ui), userData(data / L"WebView"),
+          mediaPath(media), dispatch(std::move(bridge)), closed(std::move(close)), kind(std::move(name)) {}
     void show() {
         if (hwnd) {
             ShowWindow(hwnd, SW_RESTORE);
@@ -313,9 +315,10 @@ class Panel : public std::enable_shared_from_this<Panel> {
             return;
         }
         registerClass(L"CiXiaPanel", proc);
-        bool settings = kind == "settings";
+        bool settings = kind == "settings", editor = kind == "editor", gallery = kind == "gallery";
         auto dpi = GetDpiForSystem();
-        int w = MulDiv(settings ? 680 : 1140, dpi, 96), h = MulDiv(settings ? 640 : 780, dpi, 96);
+        int w = MulDiv(settings ? 680 : gallery ? 730 : editor ? 960 : 1140, dpi, 96);
+        int h = MulDiv(settings ? 640 : gallery ? 540 : editor ? 680 : 780, dpi, 96);
         POINT cursor;
         GetCursorPos(&cursor);
         MONITORINFO mi{sizeof(mi)};
@@ -323,14 +326,19 @@ class Panel : public std::enable_shared_from_this<Panel> {
         RECT r = mi.rcWork;
         w = std::min(w, (int)(r.right - r.left));
         h = std::min(h, (int)(r.bottom - r.top));
-        hwnd = CreateWindowExW(0, L"CiXiaPanel", settings ? L"词匣 · 设置" : L"词匣", WS_OVERLAPPEDWINDOW,
-                               r.left + (r.right - r.left - w) / 2, r.top + (r.bottom - r.top - h) / 2, w, h,
-                               nullptr, nullptr, instance(), this);
+        DWORD ex = editor || gallery ? WS_EX_TOPMOST | WS_EX_TOOLWINDOW : 0;
+        const wchar_t *caption = settings  ? L"词匣 · 设置"
+                                 : editor  ? L"截图编辑"
+                                 : gallery ? L"近期截图"
+                                           : L"词匣";
+        hwnd = CreateWindowExW(ex, L"CiXiaPanel", caption, WS_OVERLAPPEDWINDOW,
+                               r.left + (r.right - r.left - w) / 2, r.top + (r.bottom - r.top - h) / 2, w,
+                               h, nullptr, nullptr, instance(), this);
         require(hwnd, "无法创建工作台窗口。");
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        url = settings ? L"https://app.cixia.local/desktop/ui/settings.html"
-                       : L"https://app.cixia.local/index.html";
+        url = kind == "main" ? L"https://app.cixia.local/index.html"
+                             : L"https://app.cixia.local/desktop/ui/" + wide(kind) + L".html";
         auto dll = LoadLibraryExW((exeDir() / L"WebView2Loader.dll").c_str(), nullptr,
                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         using Create =

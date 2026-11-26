@@ -45,7 +45,7 @@ cp "$repo/index.html" "$stage/www/"
 cp -R "$repo/prototype" "$stage/www/"
 cp -R "$repo/desktop/ui" "$stage/www/desktop/"
 find "$stage" -name .DS_Store -delete
-makensis -V2 "-DOUTPUT=$out/CiXia-1.0.0-Windows-x64-Setup.exe" "-DICONFILE=$src/CiXia.ico" \
+makensis -V2 "-DOUTPUT=$out/CiXia-1.1.0-Windows-x64-Setup.exe" "-DICONFILE=$src/CiXia.ico" \
   "-DBOOTSTRAP=$tools_dir/MicrosoftEdgeWebview2Setup.exe" "-DSTAGE=$stage" "$src/installer.nsi"
 if [ -n "${PS_WINDOWS_STAGE:-}" ]; then mkdir -p "$PS_WINDOWS_STAGE"; cp -R "$stage/." "$PS_WINDOWS_STAGE/"; fi
-echo "$out/CiXia-1.0.0-Windows-x64-Setup.exe"
+echo "$out/CiXia-1.1.0-Windows-x64-Setup.exe"

@@ -46,6 +46,8 @@ class Application {
                       }};
     Json settings = defaults;
     std::map<string, std::shared_ptr<Panel>> panels;
+    std::map<string, std::vector<std::weak_ptr<Panel>>> restoreOnClose;
+    std::map<string, HWND> pins;
     std::map<Chord, int> registered;
     std::map<int, string> assigned;
     int nextKey = 50, tries = 0;
@@ -157,25 +159,75 @@ class Application {
         for (auto &[k, p] : panels)
             p->post({{"event", "history.changed"}, {"data", Json::object()}});
     }
-    std::shared_ptr<Panel> open(string area) {
+    std::shared_ptr<Panel> open(string area, string instanceKey = "") {
         if (area == "shelf") {
             shelf.show();
             return nullptr;
         }
-        string kind = area == "settings" ? area : "main";
-        auto p = panels[kind];
+        string kind = (area == "settings" || area == "editor" || area == "gallery") ? area : "main";
+        string key = instanceKey.empty() ? kind : instanceKey;
+        auto p = panels[key];
         if (!p) {
             p = std::make_shared<Panel>(
                 kind, resources, home, archive.mediaDir(),
                 [this](const wstring &u) { return archive.externalResource(u); },
                 [this](Panel &p, const Json &m) { message(p, m); },
-                [this, kind](HWND) { panels.erase(kind); });
-            panels[kind] = p;
+                [this, key](HWND) {
+                    panels.erase(key);
+                    auto prior = restoreOnClose.find(key);
+                    if (prior != restoreOnClose.end()) {
+                        if (!exiting)
+                            restoreWindows(prior->second);
+                        restoreOnClose.erase(prior);
+                    }
+                });
+            panels[key] = p;
         }
         p->show();
         if (kind == "main" && area != "main")
             p->post({{"event", "route"}, {"data", {{"area", area}}}});
         return p;
+    }
+    void editImage(Json image, bool fromCapture = false) {
+        require(image.value("type", "image") == "image", "只能编辑图片。");
+        const string key = "editor-" + genId();
+        auto panel = open("editor", key);
+        if (fromCapture)
+            restoreOnClose.emplace(key, std::exchange(hidden, {}));
+        panel->post({{"event", "capture.ready"}, {"data", std::move(image)}});
+    }
+    void showPin(const string &id, Frame frame, const string &title) {
+        pins[id] =
+            pinImage(std::move(frame), wide(title), pins.size(), [this, id](HWND) { pins.erase(id); });
+    }
+    bool pinRecord(const string &id) {
+        auto pin = pins.find(id);
+        if (pin != pins.end() && IsWindow(pin->second)) {
+            if (IsIconic(pin->second))
+                ShowWindow(pin->second, SW_SHOWNOACTIVATE);
+            SetWindowPos(pin->second, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            return false;
+        }
+        showPin(id, archive.pinFrame(id), archive.get(id).value("title", "置顶截图"));
+        return true;
+    }
+    void pinSelected(const Json &ids) {
+        require(ids.is_array() && !ids.empty(), "请选择要置顶的截图。");
+        for (const auto &id : ids)
+            require(isCapture(archive.get(id.get<string>())), "所选截图已失效，请重新选择。");
+        std::vector<HWND> opened;
+        opened.reserve(ids.size());
+        try {
+            for (const auto &value : ids) {
+                auto id = value.get<string>();
+                if (pinRecord(id))
+                    opened.push_back(pins.at(id));
+            }
+        } catch (...) {
+            for (auto h : opened)
+                DestroyWindow(h);
+            throw;
+        }
     }
     void save(Panel &panel, const Json &p) {
         wstring base = fs::path(wide(p.value("filename", "capture.png"))).filename().wstring();
@@ -220,13 +272,14 @@ class Application {
             }
         SetTimer(root, 2, 180, nullptr);
     }
-    void restore() {
-        for (auto &weak : hidden)
+    static void restoreWindows(std::vector<std::weak_ptr<Panel>> &list) {
+        for (auto &weak : list)
             if (auto p = weak.lock())
                 if (p->hwnd)
                     ShowWindow(p->hwnd, SW_SHOWNOACTIVATE);
-        hidden.clear();
+        list.clear();
     }
+    void restore() { restoreWindows(hidden); }
     void makeCapture() {
         queuedCapture = false;
         DwmFlush();
@@ -236,25 +289,32 @@ class Application {
                 [this](Frame &&f) {
                     try {
                         Bytes png = encodeFrame(f);
-                        string title = wantLong ? "滚动长截图" : "屏幕截图";
-                        auto result = archive.binary(&png, nullptr, "image", "image/png", title + ".png",
-                                                     title, "截图工具");
+                        string title = f.h > capture.frameHeight() ? "滚动长截图" : "屏幕截图";
+                        Json image = {{"title", title},
+                                      {"type", "image"},
+                                      {"mime", "image/png"},
+                                      {"filename", title + ".png"},
+                                      {"width", f.w},
+                                      {"height", f.h},
+                                      {"frameHeight", capture.frameHeight()}};
                         try {
-                            archive.writeToClipboard(root, result["id"]);
+                            const auto result =
+                                archive.binary(&png, nullptr, "image", "image/png", title + ".png", title,
+                                               "截图工具", false, capture.frameHeight());
+                            image["id"] = result.at("id");
+                            changed();
+                        } catch (const std::exception &e) {
+                            image["archiveError"] = e.what();
+                            notify(string("原图已进入编辑器，未加入历史：") + e.what());
+                        }
+                        try {
+                            copyImage(root, f, png);
                             lastSeq = GetClipboardSequenceNumber();
                         } catch (...) {
-                            notify("截图已归档，但系统剪贴板暂时不可写。");
+                            notify("原图已进入编辑器，系统剪贴板暂时不可写。");
                         }
-                        restore();
-                        changed();
-                        auto p = open("capture");
-                        p->post({{"event", "capture.ready"},
-                                 {"data",
-                                  {{"id", result["id"]},
-                                   {"title", title},
-                                   {"mime", "image/png"},
-                                   {"data", to64(png)},
-                                   {"frameHeight", capture.frameHeight()}}}});
+                        image["data"] = to64(png);
+                        editImage(std::move(image), true);
                     } catch (const std::exception &e) {
                         restore();
                         notify(e.what());
@@ -329,6 +389,29 @@ class Application {
                 result = settings;
                 for (auto &[name, panel] : panels)
                     panel->post({{"event", "settings.changed"}, {"data", settings}});
+            } else if (cmd == "capture.list")
+                result = archive.captureList();
+            else if (cmd == "capture.pinMany")
+                pinSelected(v.at("ids"));
+            else if (cmd == "capture.copy") {
+                if (v.contains("data")) {
+                    auto bytes = from64(v.at("data"));
+                    auto pixels = decodePng(bytes);
+                    copyImage(root, pixels, bytes);
+                    lastSeq = GetClipboardSequenceNumber();
+                    try {
+                        result = archive.binary(
+                            &bytes, nullptr, "image", "image/png", v.value("filename", "标注截图.png"),
+                            v.value("title", "标注截图"), "截图工具", false, v.value("frameHeight", 0));
+                        changed();
+                    } catch (const std::exception &e) {
+                        result = {{"copied", true}, {"warning", string("已复制，未加入历史：") + e.what()}};
+                        notify(result.at("warning").get<string>());
+                    }
+                } else {
+                    archive.writeToClipboard(root, v.at("id"));
+                    lastSeq = GetClipboardSequenceNumber();
+                }
             } else if (cmd == "history.list")
                 result = archive.list();
             else if (cmd == "history.detail")
@@ -362,27 +445,24 @@ class Application {
                 requestCapture(v.value("long", false), v.value("automatic", true));
             else if (cmd == "capture.pin") {
                 if (v.contains("data")) {
-                    auto tmp = home / wide(genId() + ".png");
-                    try {
-                        writeBytes(tmp, from64(v.at("data")));
-                        auto f = decodeImage(tmp);
-                        fs::remove(tmp);
-                        pinImage(std::move(f));
-                    } catch (...) {
-                        std::error_code ec;
-                        fs::remove(tmp, ec);
-                        throw;
-                    }
-                } else
-                    pinImage(archive.pinFrame(v.value("id", "")));
+                    auto bytes = from64(v.at("data"));
+                    showPin(genId(), decodePng(bytes), v.value("title", "置顶截图"));
+                } else if (v.contains("id"))
+                    pinRecord(v.at("id"));
+                else
+                    open("gallery");
             } else if (cmd == "file.save")
                 save(p, v);
             else if (cmd == "window.open") {
                 string area = v.value("area", "main");
                 require(area == "main" || area == "settings" || area == "shelf" || area == "personal" ||
-                            area == "clipboard" || area == "capture" || area == "builtin",
+                            area == "clipboard" || area == "capture" || area == "builtin" ||
+                            area == "editor" || area == "gallery",
                         "窗口不存在。");
-                open(area);
+                if (area == "editor")
+                    editImage(archive.details(v.at("id")));
+                else
+                    open(area);
             } else if (cmd == "window.close")
                 close = true;
             else
@@ -401,7 +481,7 @@ class Application {
         AppendMenuW(m, MF_STRING, 11, L"剪贴板历史");
         AppendMenuW(m, MF_STRING, 12, L"截取屏幕");
         AppendMenuW(m, MF_STRING, 13, L"滚动长截图");
-        AppendMenuW(m, MF_STRING, 14, L"置顶最近截图");
+        AppendMenuW(m, MF_STRING, 14, L"近期截图库…");
         AppendMenuW(m, MF_STRING, 15, L"设置");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, 16, L"退出词匣");
@@ -418,7 +498,7 @@ class Application {
         if (n == 12 || n == 13)
             requestCapture(n == 13, n == 13);
         if (n == 14)
-            pinImage(archive.pinFrame(""));
+            open("gallery");
         if (n == 15)
             open("settings");
         if (n == 16)
@@ -455,7 +535,7 @@ class Application {
                 else if (a->second == "capture")
                     requestCapture(false, false);
                 else
-                    pinImage(archive.pinFrame(""));
+                    open("gallery");
                 return 0;
             }
             if (msg == WM_CLIPBOARDUPDATE) {
@@ -477,15 +557,19 @@ class Application {
             if (msg == WM_DESTROY) {
                 exiting = true;
                 shelf.dismiss(false);
+                hidden.clear();
+                if(capture.active()) capture.stop();
+                while (!pins.empty())
+                    DestroyWindow(pins.begin()->second);
                 setListening(false);
                 for (auto &[key, id] : registered)
                     UnregisterHotKey(root, id);
                 registered.clear();
                 while (!panels.empty()) {
+                    const string key = panels.begin()->first;
                     auto p = panels.begin()->second;
                     p->shutdown();
-                    if (!p->hwnd)
-                        panels.erase(p->kind);
+                    panels.erase(key);
                 }
                 Shell_NotifyIconW(NIM_DELETE, &tray);
                 PostQuitMessage(0);
@@ -510,8 +594,8 @@ class Application {
   public:
     int run() {
         registerClass(L"CiXiaNativeService", proc);
-        root = CreateWindowW(L"CiXiaNativeService", L"词匣服务", WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr,
-                             instance(), this);
+        root = CreateWindowW(L"CiXiaNativeService", L"词匣服务", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
+                             nullptr, instance(), this);
         require(root, "后台工作区启动失败。");
         addTray();
         if (fs::exists(home / L"settings.json")) {

@@ -2,10 +2,10 @@ import AppKit
 import ApplicationServices
 import ScreenCaptureKit
 
-@_silgen_name("ps_scroll_overlap")
-private func scrollOverlap(
+@_silgen_name("ps_scroll_match")
+private func scrollMatch(
   _ previous: UnsafePointer<UInt8>, _ next: UnsafePointer<UInt8>,
-  _ width: UInt32, _ height: UInt32, _ stride: UInt32
+  _ width: UInt32, _ height: UInt32, _ stride: UInt32, _ seam: UnsafeMutablePointer<UInt32>
 ) -> UInt32
 
 @MainActor private final class SelectionPanel: NSPanel {
@@ -102,17 +102,17 @@ private struct CapturedPixels {
     guard rendered else { throw NativeFailure("无法读取这帧截图。") }
     data = bytes
   }
-  func matchingRows(_ newer: CapturedPixels) -> Int {
-    guard width == newer.width, height == newer.height else { return 0 }
-    return data.withUnsafeBytes { old in
+  func match(_ newer: CapturedPixels) -> (overlap: Int, seam: Int) {
+    guard width == newer.width, height == newer.height else { return (0, 0) }
+    var seam: UInt32 = 0
+    let overlap = data.withUnsafeBytes { old in
       newer.data.withUnsafeBytes { new in
-        Int(
-          scrollOverlap(
-            old.bindMemory(to: UInt8.self).baseAddress!,
-            new.bindMemory(to: UInt8.self).baseAddress!,
-            UInt32(width), UInt32(height), UInt32(stride)))
+        scrollMatch(
+          old.bindMemory(to: UInt8.self).baseAddress!, new.bindMemory(to: UInt8.self).baseAddress!,
+          UInt32(width), UInt32(height), UInt32(stride), &seam)
       }
     }
+    return (Int(overlap), Int(seam))
   }
   static func makeImage(_ bytes: Data, width: Int, height: Int) -> CGImage? {
     guard let provider = CGDataProvider(data: bytes as CFData) else { return nil }
@@ -124,10 +124,10 @@ private struct CapturedPixels {
 }
 
 @MainActor final class NativeCaptureSession: NSObject {
-  let isLong: Bool
+  private(set) var isLong: Bool
   var onStatus: ((String) -> Void)?
   var onFinish: ((CGImage?) -> Void)?
-  var hasFrames: Bool { previous != nil }
+  var hasFrames: Bool { firstImage != nil }
   private(set) var frameHeight = 0
   private var automatic: Bool
   private var done = false
@@ -135,14 +135,20 @@ private struct CapturedPixels {
   private var overlays: [NSPanel] = []
   private var toolbar: NSPanel?
   private var statusField: NSTextField?
-  private var manualButton: NSButton?
+  private var modeButton: NSButton?
+  private var border: NSPanel?
+  private var frozenPreview: NSImageView?
+  private var firstImage: CGImage?
+  private var pendingFinish = false
+  private var missedOverlap = false
+  private var canScroll = false
   private var autoButton: NSButton?
   private var finishButton: NSButton?
   private var task: Task<Void, Never>?
   private var filter: SCContentFilter?
   private var configuration: SCStreamConfiguration?
   private var scrollCenter = CGPoint.zero
-  private var scrollTarget: pid_t?
+  private var scrollTarget: CGWindowID?
   private var cursorBeforeAutomatic: CGPoint?
   private var previous: CapturedPixels?
   private var combined = Data()
@@ -153,7 +159,7 @@ private struct CapturedPixels {
   private var scheduled: DispatchWorkItem?
   init(isLong: Bool, automatic: Bool) {
     self.isLong = isLong
-    self.automatic = automatic
+    self.automatic = isLong && automatic
   }
   func begin() {
     guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
@@ -213,11 +219,11 @@ private struct CapturedPixels {
       y: quartzBounds.minY + (top + localRect.height / 2) * quartzBounds.height
         / screen.frame.height)
     step = Int32(min(650, max(10, localRect.height * 0.53)))
-    if isLong {
-      if automatic && !AXIsProcessTrusted() { automatic = false }
-      showToolbar(
-        screen: screen, selection: localRect.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY))
-    }
+    let globalRect = localRect.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY)
+    canScroll = localRect.width >= 40 && localRect.height >= 48
+    if automatic && !AXIsProcessTrusted() { automatic = false }
+    showBorder(selection: globalRect)
+    showToolbar(screen: screen, selection: globalRect)
     task = Task { [weak self] in
       guard let self else { return }
       do {
@@ -228,10 +234,9 @@ private struct CapturedPixels {
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
           throw NativeFailure("显示器已断开。")
         }
-        let excluded = content.windows.filter { w in
-          guard let toolbar = self.toolbar else { return false }
-          return w.windowID == CGWindowID(toolbar.windowNumber)
-        }
+        let decorationIDs = Set(
+          [toolbar, border].compactMap { $0 }.map { CGWindowID($0.windowNumber) })
+        let excluded = content.windows.filter { decorationIDs.contains($0.windowID) }
         let filter = SCContentFilter(display: display, excludingWindows: excluded)
         let config = SCStreamConfiguration()
         let sx = CGFloat(display.width) / screen.frame.width
@@ -248,12 +253,38 @@ private struct CapturedPixels {
         config.showsCursor = false
         self.filter = filter
         self.configuration = config
-        if isLong { scrollTarget = windowAtScrollPoint() }
+        scrollTarget = windowAtScrollPoint()
         takeFrame()
       } catch {
         if !done { fail(error.localizedDescription) }
       }
     }
+  }
+  private func showBorder(selection: NSRect) {
+    // Draw outside the selected pixels; mouse and scroll events keep going to the source window.
+    let border = NSPanel(
+      contentRect: selection.insetBy(dx: -2, dy: -2),
+      styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    border.isOpaque = false
+    border.backgroundColor = .clear
+    border.hasShadow = false
+    border.ignoresMouseEvents = true
+    border.level = .floating
+    border.hidesOnDeactivate = false
+    border.isReleasedWhenClosed = false
+    border.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    let edge = NSView()
+    edge.wantsLayer = true
+    edge.layer?.borderWidth = 2
+    edge.layer?.borderColor = NSColor.systemTeal.cgColor
+    let preview = NSImageView(
+      frame: NSRect(x: 2, y: 2, width: selection.width, height: selection.height))
+    preview.imageScaling = .scaleAxesIndependently
+    edge.addSubview(preview)
+    frozenPreview = preview
+    border.contentView = edge
+    self.border = border
+    border.orderFrontRegardless()
   }
   private func showToolbar(screen: NSScreen, selection: CGRect) {
     let visible = screen.visibleFrame
@@ -285,21 +316,26 @@ private struct CapturedPixels {
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
     statusField = label
-    let manual = NSButton(title: "采集当前屏", target: self, action: #selector(manualStep))
+    let mode = NSButton(title: "滚动长截图", target: self, action: #selector(changeMode))
     let auto = NSButton(title: "自动滚动", target: self, action: #selector(toggleAuto))
-    let finish = NSButton(title: "完成", target: self, action: #selector(finish))
+    let finish = NSButton(title: "编辑截图", target: self, action: #selector(finish))
     let quit = NSButton(title: "取消", target: self, action: #selector(cancel))
-    manualButton = manual
+    modeButton = mode
     autoButton = auto
     finishButton = finish
-    for b in [manual, auto, finish, quit] {
+    for b in [mode, auto, finish, quit] {
       b.bezelStyle = .rounded
-      b.controlSize = .small
+      b.controlSize = .regular
     }
-    let stack = NSStackView(views: [manual, auto, finish, quit])
-    stack.spacing = 6
-    stack.frame = NSRect(x: 9, y: 7, width: min(375, width - 18), height: 28)
+    let stack = NSStackView(views: [finish, mode, auto, quit])
+    stack.spacing = 7
+    stack.alignment = .centerY
+    stack.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+      stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -7),
+    ])
     panel.contentView = view
     toolbar = panel
     panel.orderFrontRegardless()
@@ -308,15 +344,18 @@ private struct CapturedPixels {
   private func setStatus(_ text: String) {
     statusField?.stringValue = text
     statusField?.toolTip = text
-    manualButton?.isEnabled = hasFrames && !working && !automatic
+    modeButton?.title = isLong ? "返回普通截图" : "滚动长截图"
+    modeButton?.isEnabled = hasFrames && (isLong || canScroll)
+    autoButton?.isHidden = !isLong
     autoButton?.isEnabled = hasFrames
-    autoButton?.title = automatic ? "切换手动" : "自动滚动"
+    autoButton?.title = automatic ? "切换手动滚动" : "自动滚动"
+    finishButton?.title = isLong ? "完成并编辑" : "编辑截图"
     finishButton?.isEnabled = hasFrames
   }
   private func takeFrame() {
     guard !done, !working, let filter, let configuration else { return }
+    let requestedAfterFinishClick = pendingFinish
     working = true
-    manualButton?.isEnabled = false
     task = Task { [weak self] in
       guard let self else { return }
       do {
@@ -324,51 +363,110 @@ private struct CapturedPixels {
           contentFilter: filter, configuration: configuration)
         guard !done else { return }
         working = false
-        if frameHeight == 0 { frameHeight = image.height }
+        if firstImage == nil {
+          firstImage = image
+          frameHeight = image.height
+          if !isLong { frozenPreview?.image = NSImage(cgImage: image, size: .zero) }
+        }
         if !isLong {
-          end(with: image)
+          setStatus("普通截图 · \(image.width) × \(frameHeight) px")
           return
         }
+        // A capture that was already in flight when Finish was clicked can show
+        // the page before the last wheel step. Include a fresh sample as well.
+        let needsFinalSample = pendingFinish && !requestedAfterFinishClick
+        if needsFinalSample { pendingFinish = false }
         try ingest(CapturedPixels(image))
+        if needsFinalSample && !done {
+          scheduled?.cancel()
+          pendingFinish = true
+          takeFrame()
+        }
       } catch {
         guard !done else { return }
         working = false
+        pendingFinish = false
         if hasFrames {
           automatic = false
-          setStatus("本帧采集失败，可重试或完成已采集内容。")
-          onStatus?(error.localizedDescription)
+          missedOverlap = true
+          setStatus("本帧采集失败，稍后重试或返回普通截图。")
+          scheduleNext()
         } else {
           fail("截图失败。" + error.localizedDescription)
         }
       }
     }
   }
+  @objc private func changeMode() {
+    guard let firstImage, !done else { return }
+    scheduled?.cancel()
+    pendingFinish = false
+    automatic = false
+    unchanged = 0
+    missedOverlap = false
+    if isLong {
+      isLong = false
+      previous = nil
+      combined = Data()
+      frames = 0
+      totalRows = 0
+      frozenPreview?.image = NSImage(cgImage: firstImage, size: .zero)
+      setStatus("普通截图 · \(firstImage.width) × \(frameHeight) px")
+    } else {
+      guard canScroll else {
+        setStatus("选区太小，请取消后框选更大的滚动区域。")
+        return
+      }
+      isLong = true
+      frozenPreview?.image = nil
+      do { try ingest(CapturedPixels(firstImage)) } catch { fail(error.localizedDescription) }
+    }
+  }
   private func ingest(_ next: CapturedPixels) throws {
     if let previous {
-      let overlap = previous.matchingRows(next)
+      let (overlap, seam) = previous.match(next)
       if overlap == next.height {
         unchanged += 1
-        if automatic && unchanged >= 3 {
-          onStatus?("画面连续无变化，已完成长截图。")
-          finish()
-          return
+        if missedOverlap { setStatus("已回到上一帧，可继续向下滚动 · \(totalRows) px") }
+        missedOverlap = false
+        if pendingFinish || (automatic && unchanged >= 3) {
+          if frames > 1 {
+            finishImage()
+            return
+          }
+          pendingFinish = false
+          automatic = false
+          setStatus("仅采到首屏。请在框内向下滚动，或返回普通截图。")
         }
-        setStatus("画面没有变化 · \(totalRows) px")
-        scheduleScroll()
+        scheduleNext()
         return
       }
       guard overlap > 0, overlap < next.height else {
         automatic = false
-        setStatus("两屏缺少可靠重叠：请向上微调，再采集当前屏。")
+        pendingFinish = false
+        missedOverlap = true
+        setStatus("这段未拼入。向上回滚至上一屏附近，再缓慢向下滚动。")
+        scheduleNext()
         return
       }
       let extra = next.height - overlap
       guard totalRows + extra <= min(32000, 32_000_000 / next.width) else {
-        onStatus?("已达到长图尺寸上限，已保存已拼接的部分。")
-        finish()
+        automatic = false
+        pendingFinish = false
+        if frames > 1 {
+          onStatus?("已达长图尺寸上限，本次编辑已成功拼接的部分。")
+          finishImage()
+        } else {
+          setStatus("已达尺寸上限。请缩小选区，或返回普通截图。")
+          scheduleNext()
+        }
         return
       }
-      combined.append(next.data.suffix(extra * next.stride))
+      // Join inside the shared content. Keeping only the previous top and new
+      // bottom prevents fixed headers and footers recurring at each seam.
+      let start = seam
+      combined.removeLast((overlap - start) * next.stride)
+      combined.append(next.data.suffix((next.height - start) * next.stride))
       totalRows += extra
     } else {
       combined = next.data
@@ -376,36 +474,50 @@ private struct CapturedPixels {
     }
     previous = next
     frames += 1
+    missedOverlap = false
     unchanged = 0
-    setStatus(
-      automatic
-        ? "自动滚动 · 已采集 \(frames) 屏，\(totalRows) px" : "手动向下滚动约半屏，再点采集 · \(frames) 屏，\(totalRows) px")
-    scheduleScroll()
+    let gesture = automatic ? "自动滚动中" : "请在框内向下滚动，正在自动采集"
+    setStatus("\(gesture) · 已拼 \(frames) 帧 / \(totalRows) px")
+    if pendingFinish {
+      pendingFinish = false
+      if frames > 1 {
+        finishImage()
+        return
+      }
+      setStatus("仅采到首屏。请在框内向下滚动，或返回普通截图。")
+    }
+    scheduleNext()
   }
-  private func scheduleScroll() {
+  private func scheduleNext() {
     scheduled?.cancel()
-    guard automatic, !done else { return }
-    let job = DispatchWorkItem { [weak self] in self?.scrollOnce() }
+    guard isLong, !done else { return }
+    let job = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      if self.automatic { self.scrollOnce() } else { self.takeFrame() }
+    }
     scheduled = job
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.24, execute: job)
+    // Sampling runs only during an active long capture. Polling also sees keyboard,
+    // scrollbar dragging and momentum without requiring global input monitoring.
+    let pixels = (configuration?.width ?? 1) * (configuration?.height ?? 1)
+    let delay = automatic ? 0.24 : min(0.38, max(0.105, Double(pixels) / 23_000_000))
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: job)
   }
-  private func windowAtScrollPoint() -> pid_t? {
+  private func windowAtScrollPoint() -> CGWindowID? {
     let windows =
       CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
       as? [[String: Any]] ?? []
     for window in windows {
       guard let id = window[kCGWindowNumber as String] as? NSNumber,
-        id.intValue != toolbar?.windowNumber,
+        id.intValue != toolbar?.windowNumber, id.intValue != border?.windowNumber,
         let layer = window[kCGWindowLayer as String] as? NSNumber,
         layer.intValue >= NSWindow.Level.normal.rawValue,
         layer.intValue <= NSWindow.Level.modalPanel.rawValue,
         (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0.02,
         let box = window[kCGWindowBounds as String] as? [String: Any],
         let bounds = CGRect(dictionaryRepresentation: box as CFDictionary),
-        bounds.contains(scrollCenter),
-        let owner = window[kCGWindowOwnerPID as String] as? NSNumber
+        bounds.contains(scrollCenter)
       else { continue }
-      return owner.int32Value
+      return id.uint32Value
     }
     return nil
   }
@@ -417,16 +529,26 @@ private struct CapturedPixels {
         wheel3: 0)
     else {
       automatic = false
-      setStatus("自动滚动需要辅助功能权限。可手动滚动后点采集。")
+      setStatus("自动滚动需要辅助功能权限。可直接在框内手动滚动。")
+      scheduleNext()
+      return
+    }
+    guard let target = scrollTarget, windowAtScrollPoint() == target else {
+      automatic = false
+      setStatus("选区上方的窗口已改变。请恢复原窗口，再继续滚动。")
+      scheduleNext()
       return
     }
     if cursorBeforeAutomatic == nil {
       cursorBeforeAutomatic = CGEvent(source: nil)?.location
       CGWarpMouseCursorPosition(scrollCenter)
-    }
-    if let target = scrollTarget, windowAtScrollPoint() != target {
+    } else if let mouse = CGEvent(source: nil)?.location,
+      hypot(mouse.x - scrollCenter.x, mouse.y - scrollCenter.y) > 10
+    {
       automatic = false
-      setStatus("选区上方的窗口已改变。请恢复原窗口，再继续滚动。")
+      cursorBeforeAutomatic = nil
+      setStatus("鼠标已移开，自动滚动暂停。可继续手动滚动或完成。")
+      scheduleNext()
       return
     }
     // A phased, continuous pixel gesture delivers the requested distance.
@@ -450,29 +572,40 @@ private struct CapturedPixels {
     scheduled = job
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: job)
   }
-  @objc private func manualStep() { if !automatic { takeFrame() } }
   @objc private func toggleAuto() {
     scheduled?.cancel()
     if automatic {
       automatic = false
-      setStatus("手动向下滚动约半屏，再点采集。")
+      setStatus("请在框内向下滚动，正在自动采集。")
+      scheduleNext()
     } else {
       let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
       guard AXIsProcessTrustedWithOptions([key: true] as CFDictionary) else {
-        setStatus("请在系统辅助功能设置允许词匣，或手动滚动并点采集。")
+        setStatus("请在辅助功能设置中允许词匣，或在框内手动滚动。")
+        scheduleNext()
         return
       }
       automatic = true
+      cursorBeforeAutomatic = nil
       unchanged = 0
       setStatus("正在自动滚动…")
-      scheduleScroll()
+      scheduleNext()
     }
   }
   @objc func finish() {
-    guard let previous else {
-      cancel()
+    guard !done, let firstImage else { return }
+    if !isLong {
+      end(with: firstImage)
       return
     }
+    scheduled?.cancel()
+    automatic = false
+    pendingFinish = true
+    // Include a change immediately before the user pressed Finish.
+    if !working { takeFrame() }
+  }
+  private func finishImage() {
+    guard !missedOverlap, frames > 1, let previous else { return }
     guard let image = CapturedPixels.makeImage(combined, width: previous.width, height: totalRows)
     else {
       fail("无法生成长图。")
@@ -494,6 +627,11 @@ private struct CapturedPixels {
     toolbar?.orderOut(nil)
     toolbar?.close()
     toolbar = nil
+    border?.orderOut(nil)
+    border?.close()
+    border = nil
+    frozenPreview = nil
+    firstImage = nil
     if let old = cursorBeforeAutomatic, let current = CGEvent(source: nil)?.location,
       hypot(current.x - scrollCenter.x, current.y - scrollCenter.y) < 5
     {

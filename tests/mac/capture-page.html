@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>词匣滚动截图回归测试</title>
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; background: white; color: #293e47; font: 16px system-ui; overflow-anchor: none; }
+h1 { margin: 0; background: #ec7956; padding: 12px 14px; color: #101820; font-size: 23px; }
+.sticky h1 { position: sticky; top: 0; }
+p { margin: 0; padding: 7px 18px; border-bottom: 1px solid #e6ebe7; }
+b { color: #135b89; }
+footer { height: 40px; background: #19ad7e; color: white; padding: 8px 40px; }
+</style>
+<body>
+<h1>网页滚动截图验收</h1><main></main><footer>最后一段 · 页面到底 · END</footer>
+<script>
+  const rows = ['校对不同段落中的来源与引文，保留原文标点。','从浏览器中截取当前文档，观察标注的位置。',
+    '图像应当包含网页的尾部内容，段落顺序应当一致。','将长截图与区域截图进行对照。'];
+  if (location.hash === '#sticky') document.body.classList.add('sticky');
+  for (let i = 1; i <= 26; i++) {
+    const line = document.createElement('p');
+    line.style.height = (30 + i*7 % 19) + 'px';
+    line.append('第 ' + i + ' 节 ｜ ' + rows[i % 4] + ' ');
+    const value = document.createElement('b');
+    value.textContent = String(i*i*3);
+    line.append(value);
+    document.querySelector('main').append(line);
+  }
+</script>
+</body></html>

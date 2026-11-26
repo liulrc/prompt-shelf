@@ -40,8 +40,6 @@
   const store = model.createStore();
   const desktop = window.PromptDesktop?.active ? window.PromptDesktop : null;
   let desktopSettings = {hotkeys:{shelf:'Alt+Q'}, monitoring:true};
-  let pendingCapture = null;
-  let acceptCapture = null;
   const categories = {
     '研究':['research','research'], '视频':['video','video'], '文案':['pen','copy'],
     '开发':['code','dev'], '办公':['briefcase','office']
@@ -59,22 +57,23 @@
   let archive, disposeTool, closeShelf, openingShelf = false;
 
   // Classic scripts also work when the user opens index.html directly from disk.
-  function loadAsset(file) {
-    if (!assets.has(file)) {
+  function loadAsset(file, folder = 'prototype') {
+    const url = folder + '/' + file;
+    if (!assets.has(url)) {
       const style = file.endsWith('.css');
       const node = document.createElement(style ? 'link' : 'script');
-      if (style) { node.rel = 'stylesheet'; node.href = 'prototype/' + file; }
-      else node.src = 'prototype/' + file;
-      assets.set(file, new Promise((resolve,reject) => {
+      if (style) { node.rel = 'stylesheet'; node.href = url; }
+      else node.src = url;
+      assets.set(url, new Promise((resolve,reject) => {
         node.onload = resolve;
         node.onerror = () => {
-          assets.delete(file); node.remove();
+          assets.delete(url); node.remove();
           reject(new Error('工具文件加载失败，请检查 prototype 文件夹是否完整。'));
         };
         document.head.append(node);
       }));
     }
-    return assets.get(file);
+    return assets.get(url);
   }
   async function getArchive() {
     if (desktop) return archive ??= desktop.archive();
@@ -106,16 +105,14 @@
   async function mountTool(area, host) {
     host.setAttribute('aria-busy','true');
     try {
-      const [media] = await Promise.all([getArchive(), loadAsset(area+'.css'), loadAsset(area+'.js')]);
+      if (desktop && area === 'capture') {
+        await Promise.all([loadAsset('capture-home.js','desktop/ui'),loadAsset('capture-home.css','desktop/ui')]);
+        if (host.isConnected) disposeTool = window.mountCaptureHome({host,desktop,icon,notify});
+        return;
+      }
+      const [media] = await Promise.all([getArchive(), loadAsset(area+'.css'), loadAsset(area+'.js'), area === 'capture' && loadAsset('screens-zip.js')]);
       if (!host.isConnected) return;
       const options = {host,icon,escape,notify,media,openShelf,desktop,shelfShortcut:shelfKeys(), monitoring:desktopSettings.monitoring,
-        onCaptureReady(handler) {
-          acceptCapture = handler;
-          if (pendingCapture) {
-            const saved = pendingCapture; pendingCapture = null; handler(saved);
-          }
-          return () => { if (acceptCapture === handler) acceptCapture = null; };
-        },
         onHistory:() => navigate('clipboard'),
         saveToClipboardHistory:({blob,title}) => media.add({type:'image',blob,title,filename:title.replace(/\.png$/i,'')+'.png',source:'截图工具'})};
       const cleanup = await (area === 'clipboard' ? window.openClipboardTool(options) : window.openCaptureTool(options));
@@ -316,11 +313,6 @@
     desktop.on('route', data => {
       if (Object.hasOwn(areaNames, data?.area) && (state.area !== data.area || state.editing)) navigate(data.area);
     });
-    desktop.on('capture.ready', data => {
-      if (!data || (!data.data && !data.id && !data.url)) return;
-      if (state.area === 'capture' && acceptCapture) { acceptCapture(data); return; }
-      pendingCapture = data;
-      if (state.area !== 'capture') navigate('capture');
-    });
+
   }
 })();

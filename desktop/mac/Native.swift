@@ -85,8 +85,7 @@ private final class PinnedPanel: NSPanel {
   private var registered: [Shortcut: (id: UInt32, ref: EventHotKeyRef)] = [:]
   private var actionForID: [UInt32: String] = [:]
   private var nextID: UInt32 = 1
-  private var panel: NSPanel?
-  private var recent: CGImage?
+  private(set) var pinnedWindows = [String: NSPanel]()
   private var session: NativeCaptureSession?
 
   init(pasteboard: NSPasteboard = .general) {
@@ -289,9 +288,11 @@ private final class PinnedPanel: NSPanel {
     if let action = actionForID[id] { onHotkey?(action) }
   }
 
+  var isCapturing: Bool { session != nil }
+
   func captureRegion(long: Bool, automatic: Bool = true) {
     if let session {
-      if session.isLong && session.hasFrames {
+      if session.hasFrames {
         session.finish()
       } else {
         onStatus?("正在截图，按 Esc 可取消框选。")
@@ -303,12 +304,12 @@ private final class PinnedPanel: NSPanel {
     capture.onFinish = { [weak self] bitmap in
       guard let self else { return }
       let frameHeight = self.session?.frameHeight ?? bitmap?.height ?? 0
+      let capturedLong = self.session?.isLong ?? long
       self.session = nil
       guard let bitmap else {
         self.onCaptureEnded?(false)
         return
       }
-      self.recent = bitmap
       guard
         let data = NSBitmapImageRep(cgImage: bitmap).representation(using: .png, properties: [:])
       else {
@@ -316,7 +317,7 @@ private final class PinnedPanel: NSPanel {
         self.onCaptureEnded?(false)
         return
       }
-      let name = long ? "滚动长截图" : "区域截图"
+      let name = capturedLong ? "滚动长截图" : "区域截图"
       self.onCapture?([
         "type": "image", "data": data.base64EncodedString(), "title": name,
         "filename": name + ".png",
@@ -329,62 +330,71 @@ private final class PinnedPanel: NSPanel {
     capture.begin()
   }
   func stopCapture() { session?.finish() }
-  func releaseArchivedCapture() { recent = nil }
-  func pin(_ item: [String: Any]? = nil) throws {
-    let image: NSImage?
-    if let item {
-      if let encoded = item["data"] as? String, let bytes = Data(base64Encoded: encoded) {
-        image = NSImage(data: bytes)
+  func pin(_ item: [String: Any]) throws { try pinMany([item]) }
+
+  func pinMany(_ items: [[String: Any]]) throws {
+    // Decode all requested images before showing the first new window.
+    var prepared = [(id: String, title: String, image: NSImage)]()
+    var existing = [NSPanel]()
+    for item in items {
+      let id = item["id"] as? String ?? UUID().uuidString
+      if let window = pinnedWindows[id] {
+        existing.append(window)
+        continue
+      }
+      let image: NSImage?
+      if let encoded = item["data"] as? String, let data = Data(base64Encoded: encoded) {
+        image = NSImage(data: data)
       } else if let path = item["path"] as? String {
         image = NSImage(contentsOfFile: path)
       } else {
         image = nil
       }
-    } else if let recent {
-      image = NSImage(cgImage: recent, size: .zero)
-    } else {
-      image = nil
+      guard let image, image.size.width > 0, image.size.height > 0 else {
+        throw NativeFailure("截图已移除或无法读取。")
+      }
+      prepared.append((id, item["title"] as? String ?? "置顶截图", image))
     }
-    guard let image, image.size.width > 0, image.size.height > 0 else {
-      throw NativeFailure("请先截取画面或选择有效的图片。")
-    }
-    unpin()
+    existing.forEach { $0.orderFrontRegardless() }
     let screen =
       NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
     let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1000, height: 700)
-    let width = min(max(180, image.size.width), min(visible.width * 0.42, 560))
-    let scaledHeight = max(1, image.size.height * width / image.size.width)
-    let height = min(max(85, scaledHeight), visible.height * 0.58)
-    let rect = NSRect(
-      x: visible.maxX - width - 18, y: visible.maxY - height - 48, width: width, height: height)
-    let pin = PinnedPanel(
-      contentRect: rect,
-      styleMask: [.titled, .closable, .nonactivatingPanel, .resizable, .utilityWindow],
-      backing: .buffered, defer: false)
-    pin.didClose = { [weak self] in self?.panel = nil }
-    pin.title = item?["title"] as? String ?? "最近截图"
-    pin.level = .floating
-    pin.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    pin.hidesOnDeactivate = false
-    pin.isReleasedWhenClosed = false
-    let scroll = NSScrollView(frame: NSRect(origin: .zero, size: rect.size))
-    scroll.autoresizingMask = [.width, .height]
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = true
-    scroll.autohidesScrollers = true
-    let imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: width, height: scaledHeight))
-    imageView.image = image
-    imageView.imageScaling = .scaleProportionallyUpOrDown
-    scroll.documentView = imageView
-    pin.contentView = scroll
-    scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, scaledHeight - height)))
-    scroll.reflectScrolledClipView(scroll.contentView)
-    pin.orderFrontRegardless()
-    panel = pin
+    for (id, title, image) in prepared {
+      let scale = min(
+        1, min(visible.width * 0.47 / image.size.width, visible.height * 0.65 / image.size.height))
+      let size = NSSize(
+        width: max(100, image.size.width * scale), height: max(48, image.size.height * scale))
+      let offset = CGFloat(pinnedWindows.count % 7) * 25
+      let rect = NSRect(
+        x: visible.maxX - size.width - 18 - offset,
+        y: visible.maxY - size.height - 50 - offset, width: size.width, height: size.height)
+      let pin = PinnedPanel(
+        contentRect: rect,
+        styleMask: [.titled, .closable, .nonactivatingPanel, .resizable, .utilityWindow],
+        backing: .buffered, defer: false)
+      pin.title = title
+      pin.level = .floating
+      pin.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+      pin.hidesOnDeactivate = false
+      pin.isReleasedWhenClosed = false
+      pin.isMovableByWindowBackground = true
+      pin.contentMinSize = NSSize(width: 84, height: 42)
+      // Extremely long captures need a usable title bar even at fit-to-screen zoom.
+      let aspect = image.size.width / image.size.height
+      if (0.22...5).contains(aspect) { pin.contentAspectRatio = image.size }
+      let view = NSImageView(frame: NSRect(origin: .zero, size: size))
+      view.image = image
+      view.imageScaling = .scaleProportionallyUpOrDown
+      view.imageAlignment = .alignCenter
+      view.autoresizingMask = [.width, .height]
+      pin.contentView = view
+      pin.didClose = { [weak self] in self?.pinnedWindows.removeValue(forKey: id) }
+      pinnedWindows[id] = pin
+      pin.orderFrontRegardless()
+    }
   }
   func unpin() {
-    panel?.close()
-    panel = nil
+    for pin in Array(pinnedWindows.values) { pin.close() }
   }
   func shutdown() {
     stopMonitoring()

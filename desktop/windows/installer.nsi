@@ -10,11 +10,11 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 ShowInstDetails show
 ShowUninstDetails show
-VIProductVersion "1.0.0.0"
+VIProductVersion "1.1.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "词匣"
 VIAddVersionKey /LANG=2052 "FileDescription" "词匣 Windows x64 安装程序"
-VIAddVersionKey /LANG=2052 "FileVersion" "1.0.0"
-VIAddVersionKey /LANG=2052 "ProductVersion" "1.0.0"
+VIAddVersionKey /LANG=2052 "FileVersion" "1.1.0"
+VIAddVersionKey /LANG=2052 "ProductVersion" "1.1.0"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "词匣"
 !define MUI_ICON "${ICONFILE}"
 !define MUI_UNICON "${ICONFILE}"
@@ -85,7 +85,7 @@ Section
     CreateDirectory "$SMPROGRAMS\词匣"
     CreateShortcut "$SMPROGRAMS\词匣\词匣.lnk" "$INSTDIR\CiXia.exe"
     WriteRegStr HKCU "${UNREG}" "DisplayName" "词匣"
-    WriteRegStr HKCU "${UNREG}" "DisplayVersion" "1.0.0"
+    WriteRegStr HKCU "${UNREG}" "DisplayVersion" "1.1.0"
     WriteRegStr HKCU "${UNREG}" "DisplayIcon" "$INSTDIR\CiXia.exe"
     WriteRegStr HKCU "${UNREG}" "InstallLocation" "$INSTDIR"
     WriteRegStr HKCU "${UNREG}" "UninstallString" '"$INSTDIR\Uninstall.exe"'

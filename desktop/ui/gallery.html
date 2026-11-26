@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>近期截图 · 词匣</title>
+  <link rel="icon" href="../../prototype/mark.svg"><link rel="stylesheet" href="../../prototype/style.css"><link rel="stylesheet" href="gallery.css">
+  <script src="bridge.js" defer></script><script src="gallery.js" defer></script>
+</head>
+<body>
+  <main class="gallery">
+    <header><img src="../../prototype/mark.svg" alt="" width="33" height="33"><div><h1>近期截图</h1><p>选择要置顶到桌面的截图，可多选。</p></div></header>
+    <section id="grid" aria-label="截图库"><div id="list" role="group" aria-label="可选截图"></div><div id="empty" role="status">正在读取截图…</div></section>
+    <footer><div class="summary"><span id="count">已选 0 张</span><span id="message" role="status" aria-live="polite"></span></div><button class="btn" type="button" id="cancel">取消</button><button class="btn primary" type="button" id="pin" disabled>置顶所选</button></footer>
+  </main>
+</body>
+</html>

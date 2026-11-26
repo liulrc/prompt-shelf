@@ -11,10 +11,14 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   let native: NativeServices
   let webRoot: URL
   var windows = [String: NSWindow](), views = [String: WKWebView]()
-  var ready = Set<String>(), pendingArea: String?, pendingCapture: Object?
+  var ready = Set<String>(), pendingArea: String?
+  var pendingEditors = [String: Object]()
+  var returnAfterClosing = [String: NSRunningApplication]()
+  var captureReturnApp: NSRunningApplication?
+  var hiddenForCapture = [String](), captureOriginWindow: String?
   var shelf: ShelfPanel?, statusItem: NSStatusItem?, returnApp: NSRunningApplication?,
     lastExternal: NSRunningApplication?
-  var restoreCaptureWindow = false, hotkeys = defaults, monitoring = true, lastIssue = "",
+  var hotkeys = defaults, monitoring = true, lastIssue = "",
     hotkeyIssue = ""
   var settingsFile: URL { archive.root.appendingPathComponent("Settings.json") }
   let smoke: Bool
@@ -45,27 +49,19 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     }
     native.onHotkey = { [weak self] action in self?.performAction(action) }
     native.onStatus = { [weak self] text in self?.report(text) }
-    native.onCaptureEnded = { [weak self] success in
-      guard let self else { return }
-      if !success && restoreCaptureWindow { showWeb("main") }
-      restoreCaptureWindow = false
-    }
+    native.onCaptureEnded = { [weak self] success in self?.restoreAfterCapture(success: success) }
     native.onCapture = { [weak self] image in
       guard let self else { return }
+      var item = image
       do {
         let saved = try archive.add(image, capture: true)
-        native.releaseArchivedCapture()
-        var item = saved
-        item["data"] = image["data"]
-        item["frameHeight"] = image["frameHeight"]
-        pendingCapture = item
-        do { try native.writeClipboard(image) } catch { report(error.localizedDescription) }
-        showMain("capture")
+        item["id"] = saved["id"]
       } catch {
-        pendingCapture = image
-        showMain("capture")
-        report("截图已打开，归档失败：" + error.localizedDescription)
+        item["archiveError"] = error.localizedDescription
+        report("原图归档失败，可在编辑窗导出：" + error.localizedDescription)
       }
+      do { try native.writeClipboard(image) } catch { report(error.localizedDescription) }
+      openImageEditor(item, returningTo: captureReturnApp)
     }
     archive.onChange = { [weak self] in
       self?.shelf?.refresh()
@@ -160,7 +156,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     let menu = NSMenu()
     for (name, key) in [
       ("我的模板", "templates"), ("剪贴板历史栏", "shelf"), ("区域截图", "capture"), ("滚动长截图", "long"),
-      ("置顶最近截图", "pin"), ("设置…", "settings"),
+      ("近期截图库…", "pin"), ("设置…", "settings"),
     ] {
       let item = menu.addItem(withTitle: name, action: #selector(menuAction(_:)), keyEquivalent: "")
       item.target = self
@@ -210,16 +206,26 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     case "templates": showMain("personal")
     case "capture", "long": startCapture(long: action == "long", automatic: action == "long")
     case "shelf": toggleShelf()
-    case "pin": do { try pinLatest() } catch { report(error.localizedDescription) }
+    case "pin": showWeb("gallery")
     case "settings": showWeb("settings")
     default: break
     }
   }
   func startCapture(long: Bool, automatic: Bool) {
-    if let shelf { shelf.orderOut(nil) }
+    if native.isCapturing {
+      native.captureRegion(long: long, automatic: automatic)
+      return
+    }
+    let front = NSWorkspace.shared.frontmostApplication
+    captureReturnApp =
+      front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+    if shelf?.isVisible == true { dismissShelf() }
     if NSApp.isActive {
-      if windows["main"]?.isVisible == true { restoreCaptureWindow = true }
-      windows.values.forEach { $0.orderOut(nil) }
+      captureOriginWindow = windows.first(where: { $0.value.isKeyWindow })?.key
+      hiddenForCapture = windows.filter { $0.value.isVisible && !$0.value.isMiniaturized }.map {
+        $0.key
+      }
+      hiddenForCapture.forEach { windows[$0]?.orderOut(nil) }
       if let lastExternal {
         NSApp.yieldActivation(to: lastExternal)
         lastExternal.activate(options: [])
@@ -227,12 +233,28 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     }
     native.captureRegion(long: long, automatic: automatic)
   }
-  func pinLatest() throws {
-    if let item = try archive.lastCapture() {
-      try native.pin(item)
-      return
+  func restoreAfterCapture(success: Bool) {
+    for name in hiddenForCapture { windows[name]?.orderBack(nil) }
+    if !success, let name = captureOriginWindow, let window = windows[name] {
+      NSApp.activate(ignoringOtherApps: true)
+      window.makeKeyAndOrderFront(nil)
     }
-    try native.pin(nil)
+    captureOriginWindow = nil
+    hiddenForCapture.removeAll()
+    captureReturnApp = nil
+  }
+  func openImageEditor(_ item: Object, returningTo app: NSRunningApplication? = nil) {
+    let key = "editor-" + UUID().uuidString
+    pendingEditors[key] = item
+    returnAfterClosing[key] = app
+    showWeb(key)
+  }
+  func openArchivedImage(_ id: String) throws {
+    var item = try archive.publicRow(archive.raw(id))
+    guard item["type"] as? String == "image" else { throw AppIssue("仅可编辑图片。") }
+    item["data"] = try Data(contentsOf: archive.media(id), options: .mappedIfSafe)
+      .base64EncodedString()
+    openImageEditor(item)
   }
   func copyRecord(_ id: String) throws {
     var item = try archive.raw(id)
@@ -283,7 +305,13 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     flushMain()
   }
   func showWeb(_ name: String) {
-    guard ["main", "settings"].contains(name) else { return }
+    let editor = name.hasPrefix("editor-")
+    guard editor || ["main", "settings", "gallery"].contains(name) else { return }
+    if name == "gallery", let front = NSWorkspace.shared.frontmostApplication,
+      front.processIdentifier != ProcessInfo.processInfo.processIdentifier
+    {
+      returnAfterClosing[name] = front
+    }
     if let w = windows[name] {
       NSApp.activate(ignoringOtherApps: true)
       w.makeKeyAndOrderFront(nil)
@@ -294,26 +322,67 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     conf.userContentController.add(self, name: "desktop")
     if name == "main" { injectTemplateBackup(conf) }
     conf.setURLSchemeHandler(MediaScheme(archive), forURLScheme: "promptmedia")
-    let compact = name == "settings"
-    let size = compact ? CGSize(width: 570, height: 600) : CGSize(width: 1100, height: 735)
+    let fileName: String
+    let size: NSSize
+    let minSize: NSSize
+    let title: String
+    switch name {
+    case "main":
+      (fileName, size, minSize, title) = (
+        "index.html", NSSize(width: 1100, height: 735), NSSize(width: 650, height: 450),
+        "词匣 · 提示词工作台"
+      )
+    case "settings":
+      (fileName, size, minSize, title) = (
+        "desktop/ui/settings.html", NSSize(width: 570, height: 600),
+        NSSize(width: 440, height: 430), "词匣设置"
+      )
+    case "gallery":
+      (fileName, size, minSize, title) = (
+        "desktop/ui/gallery.html", NSSize(width: 720, height: 540), NSSize(width: 395, height: 300),
+        "近期截图库"
+      )
+    default:
+      (fileName, size, minSize, title) = (
+        "desktop/ui/editor.html", NSSize(width: 940, height: 680), NSSize(width: 440, height: 320),
+        "截图编辑"
+      )
+    }
+    let screen =
+      NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+    let visible = screen?.visibleFrame ?? NSRect(origin: .zero, size: size)
+    let bounds = NSRect(
+      origin: .zero,
+      size: NSSize(
+        width: min(size.width, visible.width * 0.95),
+        height: min(size.height, visible.height * 0.90)))
     let w = NSWindow(
-      contentRect: NSRect(origin: .zero, size: size),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
-    )
-    let v = WKWebView(frame: NSRect(origin: .zero, size: size), configuration: conf)
+      contentRect: bounds, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: false)
+    let v = WKWebView(frame: bounds, configuration: conf)
     v.navigationDelegate = self
     v.uiDelegate = self
     v.allowsBackForwardNavigationGestures = false
-    w.title = compact ? "词匣设置" : "词匣 · 提示词工作台"
-    w.minSize = compact ? NSSize(width: 440, height: 430) : NSSize(width: 650, height: 450)
+    w.title = title
+    w.minSize = minSize
     w.isReleasedWhenClosed = false
     w.delegate = self
     w.contentView = v
-    w.center()
-    w.setFrameAutosaveName("PromptShelf." + name)
+    if editor || name == "gallery" {
+      w.level = .floating
+      w.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+      let offset = CGFloat(windows.keys.filter { $0.hasPrefix("editor-") }.count % 5) * 15
+      w.setFrameOrigin(
+        NSPoint(
+          x: visible.midX - w.frame.width / 2 + offset,
+          y: visible.midY - w.frame.height / 2 - offset))
+    } else {
+      w.center()
+      w.setFrameAutosaveName("PromptShelf." + name)
+    }
     windows[name] = w
     views[name] = v
-    let file = webRoot.appendingPathComponent(compact ? "desktop/ui/settings.html" : "index.html")
+    let file = webRoot.appendingPathComponent(fileName)
     v.loadFileURL(file, allowingReadAccessTo: webRoot)
     NSApp.activate(ignoringOtherApps: true)
     w.makeKeyAndOrderFront(nil)
@@ -332,11 +401,21 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     windows.removeValue(forKey: name)
     views.removeValue(forKey: name)
     ready.remove(name)
+    pendingEditors.removeValue(forKey: name)
+    if let app = returnAfterClosing.removeValue(forKey: name), NSApp.isActive,
+      !windows.keys.contains(where: { $0.hasPrefix("editor-") })
+    {
+      NSApp.yieldActivation(to: app)
+      app.activate(options: [])
+    }
   }
   func webView(_ v: WKWebView, didFinish navigation: WKNavigation!) {
     guard let key = views.first(where: { $0.value === v })?.key else { return }
     ready.insert(key)
     if key == "main" { flushMain() }
+    if let image = pendingEditors.removeValue(forKey: key) {
+      send(v, ["event": "capture.ready", "data": image])
+    }
   }
   func flushMain() {
     guard ready.contains("main"), let view = views["main"] else { return }
@@ -344,10 +423,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       pendingArea = nil
       send(view, ["event": "route", "data": ["area": area]])
     }
-    if let image = pendingCapture {
-      pendingCapture = nil
-      send(view, ["event": "capture.ready", "data": image])
-    }
+
   }
   func send(_ v: WKWebView, _ obj: Object) {
     v.callAsyncJavaScript(
@@ -458,25 +534,56 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       case "capture.start":
         done(true)
         startCapture(long: p["long"] as? Bool ?? false, automatic: p["automatic"] as? Bool ?? true)
+      case "capture.list":
+        done(try archive.captures())
+      case "capture.pinMany":
+        guard let ids = p["ids"] as? [String], !ids.isEmpty, ids.count <= 100,
+          Set(ids).count == ids.count
+        else { throw AppIssue("请选择需要置顶的截图。") }
+        let items = try ids.map { try archive.raw($0) }
+        guard
+          items.allSatisfy({ $0["capture"] as? Bool == true && $0["type"] as? String == "image" })
+        else { throw AppIssue("仅可选择图库内的截图。") }
+        try native.pinMany(items)
+        done(true)
       case "capture.pin":
         if let id = p["id"] as? String {
           try native.pin(archive.raw(id))
         } else if p["data"] is String {
           try native.pin(p)
         } else {
-          try pinLatest()
+          showWeb("gallery")
         }
         done(true)
+      case "capture.copy":
+        if let id = p["id"] as? String {
+          try copyRecord(id)
+          done(true)
+        } else {
+          guard p["data"] is String else { throw AppIssue("缺少要复制的图片。") }
+          var item = p
+          item["type"] = "image"
+          item["source"] = "截图工具"
+          item["mime"] = "image/png"
+          try native.writeClipboard(item)
+          do {
+            _ = try archive.add(item, capture: true)
+            done(true)
+          } catch {
+            let warning = "图片已复制，归档失败：" + error.localizedDescription
+            report(warning)
+            done(["copied": true, "warning": warning] as Object)
+          }
+        }
       case "window.open":
         let area = p["area"] as? String ?? "main"
-        done(true)
-        if area == "settings" {
-          showWeb("settings")
-        } else if area == "shelf" {
-          toggleShelf()
-        } else {
-          showMain(area == "main" ? "personal" : area)
+        switch area {
+        case "settings", "gallery": showWeb(area)
+        case "editor": try openArchivedImage(p["id"] as? String ?? "")
+        case "shelf": toggleShelf()
+        default: showMain(area == "main" ? "personal" : area)
         }
+        done(true)
       case "window.close":
         done(true)
         v.window?.close()

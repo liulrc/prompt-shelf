@@ -1,8 +1,11 @@
 #pragma once
 #include "win.hpp"
 #include <dwmapi.h>
-extern "C" unsigned ps_scroll_overlap(const uint8_t *, const uint8_t *, unsigned, unsigned, unsigned);
-inline HINSTANCE instance() { return GetModuleHandleW(nullptr); }
+extern "C" unsigned ps_scroll_match(const uint8_t *, const uint8_t *, unsigned, unsigned, unsigned,
+                                    unsigned *);
+inline HINSTANCE instance() {
+    return GetModuleHandleW(nullptr);
+}
 inline void registerClass(const wchar_t *name, WNDPROC proc, HCURSOR cursor = nullptr) {
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = proc;
@@ -19,7 +22,11 @@ class Capture {
     RECT total{}, region{}, selection{};
     POINT anchor{}, formerPointer{};
     HWND overlay = nullptr, bar = nullptr, target = nullptr;
-    bool dragging = false, longMode = false, automatic = false, issuedWheel = false, restoredPointer = false;
+    bool dragging = false, selected = false, longMode = false, automatic = false, restoredPointer = false;
+    bool startInScroll = false, autoRequested = false, barOverlaps = false, atLimit = false;
+    ULONGLONG lastWheel = 0, lastSample = 0;
+    enum Control { Edit = 1, Scroll, Cancel, Finish, ToggleAuto, Status };
+    enum class Match { Same, Added, Unmatched, Obstructed, Limit };
     int parts = 0, stationary = 0;
     wstring status;
     std::function<void(Frame &&)> finished;
@@ -42,7 +49,7 @@ class Capture {
             drawFrame(dc, self->screen, size, size);
             HBRUSH black = CreateSolidBrush(RGB(22, 25, 19));
             RECT r = self->selection;
-            if (self->dragging) {
+            if (self->dragging || self->selected) {
                 FrameRect(dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
                 InflateRect(&r, 1, 1);
                 FrameRect(dc, &r, black);
@@ -58,6 +65,12 @@ class Capture {
             return 0;
         }
         case WM_LBUTTONDOWN:
+            if (self->selected) {
+                self->selected = false;
+                if (self->bar)
+                    DestroyWindow(self->bar);
+                self->bar = nullptr;
+            }
             self->anchor = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             self->selection = {self->anchor.x, self->anchor.y, self->anchor.x, self->anchor.y};
             self->dragging = true;
@@ -80,7 +93,7 @@ class Capture {
                     return 0;
                 }
                 try {
-                    self->commit(r);
+                    self->choose(r);
                 } catch (const std::exception &e) {
                     self->stop();
                     MessageBoxW(nullptr, wide(e.what()).c_str(), L"词匣", MB_OK | MB_ICONWARNING);
@@ -88,6 +101,10 @@ class Capture {
             }
             return 0;
         case WM_KEYDOWN:
+            if (wp == VK_RETURN && self->selected) {
+                self->finish();
+                return 0;
+            }
             if (wp == VK_ESCAPE) {
                 self->stop();
                 return 0;
@@ -108,7 +125,7 @@ class Capture {
     void label(wstring s) {
         status = std::move(s);
         if (bar)
-            SetWindowTextW(GetDlgItem(bar, 8), status.c_str());
+            SetWindowTextW(GetDlgItem(bar, Status), status.c_str());
     }
     static LRESULT CALLBACK barProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto *s = (Capture *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -127,165 +144,287 @@ class Capture {
             case WM_CLOSE:
                 s->stop();
                 return 0;
+            case WM_MOUSEACTIVATE:
+                return MA_NOACTIVATE;
             case WM_COMMAND:
-                if (LOWORD(wp) == 1) {
-                    s->automatic = false;
-                    KillTimer(hwnd, 1);
-                    s->mergeOne();
-                }
-                if (LOWORD(wp) == 2)
+                switch (LOWORD(wp)) {
+                case Edit:
                     s->finish();
-                if (LOWORD(wp) == 3)
+                    break;
+                case Scroll:
+                    s->startScrolling(false);
+                    break;
+                case Finish:
+                    s->completeLong();
+                    break;
+                case ToggleAuto:
+                    s->setAuto(!s->automatic);
+                    break;
+                case Cancel:
                     s->stop();
+                    break;
+                }
                 return 0;
             }
         } catch (const std::exception &e) {
-            s->automatic = false;
-            KillTimer(hwnd, 1);
-            s->label(wide(e.what()));
+            if (!s->bar && !s->overlay) {
+                s->stop();
+                MessageBoxW(nullptr, wide(e.what()).c_str(), L"词匣 · 截图", MB_OK | MB_ICONWARNING);
+            } else {
+                s->automatic = false;
+                s->label(wide(e.what()));
+            }
+            return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    void commit(RECT r) {
-        Frame first{int(r.right - r.left), int(r.bottom - r.top),
-                    Bytes(size_t(r.right - r.left) * (r.bottom - r.top) * 4)};
-        for (int y = 0; y < first.h; y++)
-            memcpy(&first.px[size_t(y) * first.w * 4],
-                   &screen.px[(size_t(y + r.top) * screen.w + r.left) * 4], size_t(first.w) * 4);
+    POINT middle() const { return {(region.left + region.right) / 2, (region.top + region.bottom) / 2}; }
+    void placeToolbar() {
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromPoint(middle(), MONITOR_DEFAULTTONEAREST), &mi);
+        const RECT work = mi.rcWork;
+        const auto dpi = GetDpiForWindow(overlay ? overlay : bar);
+        const int w = std::min<int>(MulDiv(456, dpi ? dpi : 96, 96), work.right - work.left);
+        const int h = MulDiv(82, dpi ? dpi : 96, 96);
+        int x = std::clamp<int>(region.left, work.left, work.right - w);
+        int y = region.bottom + 4;
+        if (y + h > work.bottom)
+            y = region.top - h - 4;
+        if (y < work.top) {
+            y = std::clamp<int>(region.top, work.top, std::max<int>(work.top, work.bottom - h));
+            if (region.right + w + 4 <= work.right)
+                x = region.right + 4;
+            else if (region.left - w - 4 >= work.left)
+                x = region.left - w - 4;
+            else
+                y = work.bottom - h;
+        }
+        RECT barRect{x, y, x + w, y + h}, intersection;
+        barOverlaps = IntersectRect(&intersection, &barRect, &region);
+        SetWindowPos(bar, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    void button(int id, const wchar_t *name, int x, int w) {
+        const auto dpi = GetDpiForWindow(bar);
+        auto px = [&](int d) { return MulDiv(d, dpi, 96); };
+        HWND b = CreateWindowW(L"BUTTON", name, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE, px(x), px(37), px(w),
+                               px(31), bar, (HMENU)(INT_PTR)id, instance(), nullptr);
+        SendMessageW(b, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+    }
+    void toolbar(bool scrolling) {
+        if (bar)
+            DestroyWindow(bar);
+        bar = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CiXiaScroll",
+                              L"截图工具栏", WS_POPUP | WS_BORDER, region.left, region.top, 1, 1, nullptr,
+                              nullptr, instance(), this);
+        require(bar, "无法打开截图工具栏。");
+        placeToolbar();
+        UINT dpi = GetDpiForWindow(bar);
+        HWND note = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, MulDiv(10, dpi, 96),
+                                  MulDiv(8, dpi, 96), MulDiv(435, dpi, 96), MulDiv(24, dpi, 96), bar,
+                                  (HMENU)(INT_PTR)Status, instance(), nullptr);
+        SendMessageW(note, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        if (scrolling) {
+            button(ToggleAuto, L"自动滚动", 10, 115);
+            button(Finish, L"完成长图并编辑", 134, 156);
+            button(Cancel, L"取消", 301, 90);
+        } else {
+            button(Edit, L"编辑普通截图", 10, 134);
+            button(Scroll, L"滚动长截图", 153, 136);
+            button(Cancel, L"取消", 301, 90);
+        }
+    }
+    void choose(RECT r) {
+        const int w = r.right - r.left, h = r.bottom - r.top;
+        Frame first{w, h, Bytes(size_t(w) * h * 4)};
+        for (int y = 0; y < h; y++)
+            memcpy(&first.px[size_t(y) * w * 4], &screen.px[(size_t(y + r.top) * screen.w + r.left) * 4],
+                   size_t(w) * 4);
         region = {r.left + total.left, r.top + total.top, r.right + total.left, r.bottom + total.top};
+        selected = true;
+        merged = std::move(first);
+        parts = 1;
+        InvalidateRect(overlay, nullptr, FALSE);
+        if (startInScroll && w >= 24 && h >= 48)
+            startScrolling(autoRequested);
+        else {
+            toolbar(false);
+            label(L"已框选 · 普通截图　Enter 编辑，也可以切换长截图");
+        }
+    }
+    void startScrolling(bool autoScroll) {
+        if (region.bottom - region.top < 48 || region.right - region.left < 24) {
+            label(L"长截图选区过小，请重新拖选滚动内容。");
+            return;
+        }
+        if (bar) {
+            DestroyWindow(bar);
+            bar = nullptr;
+        }
         DestroyWindow(overlay);
         overlay = nullptr;
         screen = {};
-        merged = first;
-        parts = 1;
-        if (!longMode) {
-            finish();
-            return;
-        }
-        previous = std::move(first);
-        POINT center{(region.left + region.right) / 2, (region.top + region.bottom) / 2};
-        target = GetAncestor(WindowFromPoint(center), GA_ROOT);
-        GetCursorPos(&formerPointer);
-        RECT work;
-        MONITORINFO mi{sizeof(mi)};
-        GetMonitorInfoW(MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST), &mi);
-        work = mi.rcWork;
-        int x = std::clamp(region.left, work.left, std::max(work.left, work.right - 435));
-        int y = region.top - work.top > 100 ? region.top - 95 : std::min(region.bottom + 3, work.bottom - 95);
-        bar = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CiXiaScroll",
-                              L"词匣 · 长截图", WS_POPUP | WS_BORDER, x, y, 435, 91, nullptr, nullptr,
-                              instance(), this);
-        require(bar, "无法打开长截图控制条。");
-        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 10, 9, 412, 23, bar, (HMENU)8, instance(),
-                      nullptr);
-        int bx = 10;
-        for (auto item :
-             {std::pair<int, const wchar_t *>{1, L"手动加入当前屏"}, {2, L"完成长截图"}, {3, L"取消"}}) {
-            HWND b = CreateWindowW(L"BUTTON", item.second, BS_PUSHBUTTON | WS_VISIBLE | WS_CHILD, bx, 40,
-                                   item.first == 1 ? 142 : 108, 34, bar, (HMENU)(INT_PTR)item.first,
-                                   instance(), nullptr);
-            SendMessageW(b, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-            bx += item.first == 1 ? 149 : 115;
-        }
-        ShowWindow(bar, SW_SHOWNOACTIVATE);
-        label(automatic ? L"自动滚动中，可随时完成或取消。" : L"请在所选窗口向下滚动少许，再加入当前屏。");
-        if (automatic) {
-            SetForegroundWindow(target);
-            SetCursorPos(center.x, center.y);
+        DwmFlush();
+        target = GetAncestor(WindowFromPoint(middle()), GA_ROOT);
+        require(target, "无法定位滚动目标窗口，请重新框选网页内容。");
+        SetForegroundWindow(target);
+        previous = merged;
+        longMode = true;
+        toolbar(true);
+        setAuto(autoScroll);
+        SetTimer(bar, 1, 130, nullptr);
+    }
+    void setAuto(bool enabled) {
+        automatic = enabled;
+        stationary = 0;
+        lastWheel = 0;
+        if (enabled) {
+            if (!restoredPointer)
+                GetCursorPos(&formerPointer);
             restoredPointer = true;
-            SetTimer(bar, 1, 450, nullptr);
+            auto center = middle();
+            SetCursorPos(center.x, center.y);
+            SetForegroundWindow(target);
         }
+        SetWindowTextW(GetDlgItem(bar, ToggleAuto), enabled ? L"手动滚动" : L"自动滚动");
+        label(enabled ? L"自动滚动中 · 正在匹配网页内容" : L"在选区内向下缓慢滚动，新增内容会自动拼接");
     }
     void tick() {
-        if (!automatic)
+        if (!longMode || atLimit)
             return;
-        if (!IsWindow(target)) {
-            automatic = false;
-            KillTimer(bar, 1);
-            label(L"来源窗口已关闭，可完成已采集的内容。");
-            return;
-        }
         if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
             stop();
             return;
         }
-        if (!issuedWheel) {
-            POINT center{(region.left + region.right) / 2, (region.top + region.bottom) / 2};
+        // If the controls couldn't fit outside the selection, a sample briefly
+        // hides them. Let mouse-down/up finish on the button before doing that.
+        if (barOverlaps) {
+            POINT pointer;
+            GetCursorPos(&pointer);
+            HWND hovered = WindowFromPoint(pointer);
+            if (hovered == bar || IsChild(bar, hovered))
+                return;
+        }
+        LASTINPUTINFO input{sizeof(input)};
+        const ULONGLONG now = GetTickCount64();
+        if (!automatic && GetLastInputInfo(&input) && DWORD(now) - input.dwTime > 1300 &&
+            now - lastSample < 1200)
+            return;
+        lastSample = now;
+        const Match match = sample();
+        if (!automatic || match == Match::Limit)
+            return;
+        if (match == Match::Obstructed || match == Match::Unmatched) {
+            setAuto(false);
+            label(match == Match::Obstructed ? L"请将所选网页移回选区，再继续滚动"
+                                             : L"当前画面缺少重叠，请向上滚回一小段再继续");
+            return;
+        }
+        if (now - lastWheel < 460)
+            return;
+        if (match == Match::Same && lastWheel && ++stationary >= 3) {
+            if (parts > 1)
+                finish();
+            else {
+                setAuto(false);
+                label(L"仍只有首屏。滚动网页正文，或重选可滚动的区域。");
+            }
+            return;
+        }
+        POINT cursor;
+        GetCursorPos(&cursor);
+        POINT center = middle();
+        if (abs(cursor.x - center.x) > 8 || abs(cursor.y - center.y) > 8) {
+            setAuto(false);
+            return;
+        }
+        INPUT wheel{};
+        wheel.type = INPUT_MOUSE;
+        wheel.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        wheel.mi.mouseData = (DWORD)(-WHEEL_DELTA);
+        if (!SendInput(1, &wheel, sizeof(wheel))) {
+            setAuto(false);
+            label(L"系统未接收自动滚动，请在网页上手动滚动。");
+            return;
+        }
+        lastWheel = now;
+    }
+    Match sample() {
+        // A toolbar fitting outside the selection can stay visible throughout sampling.
+        const bool hide = barOverlaps;
+        if (hide) {
             ShowWindow(bar, SW_HIDE);
             DwmFlush();
-            HWND visible = GetAncestor(WindowFromPoint(center), GA_ROOT);
-            if (visible != target) {
-                ShowWindow(bar, SW_SHOWNOACTIVATE);
-                automatic = false;
-                KillTimer(bar, 1);
-                label(L"目标窗口已被遮挡，请恢复后手动加入。");
-                return;
-            }
-            POINT cursor;
-            GetCursorPos(&cursor);
-            if (abs(cursor.x - center.x) > 8 || abs(cursor.y - center.y) > 8) {
-                ShowWindow(bar, SW_SHOWNOACTIVATE);
-                automatic = false;
-                KillTimer(bar, 1);
-                label(L"已暂停自动滚动，可手动加入或完成。");
-                return;
-            }
-            INPUT event{};
-            event.type = INPUT_MOUSE;
-            event.mi.dwFlags = MOUSEEVENTF_WHEEL;
-            event.mi.mouseData = (DWORD)(-WHEEL_DELTA);
-            if (!SendInput(1, &event, sizeof(event))) {
-                automatic = false;
-                KillTimer(bar, 1);
-                label(L"目标未接收滚动，请手动滚动后加入。");
-            }
-            ShowWindow(bar, SW_SHOWNOACTIVATE);
-            issuedWheel = true;
-        } else {
-            issuedWheel = false;
-            mergeOne();
         }
-    }
-    void mergeOne() {
-        ShowWindow(bar, SW_HIDE);
-        DwmFlush();
+        bool valid =
+            target && IsWindow(target) && GetAncestor(WindowFromPoint(middle()), GA_ROOT) == target;
         Frame next;
         try {
-            next = captureRect(region);
+            if (valid)
+                next = captureRect(region);
         } catch (...) {
-            ShowWindow(bar, SW_SHOWNOACTIVATE);
+            if (hide)
+                ShowWindow(bar, SW_SHOWNOACTIVATE);
             throw;
         }
-        ShowWindow(bar, SW_SHOWNOACTIVATE);
-        unsigned overlap = ps_scroll_overlap(previous.px.data(), next.px.data(), next.w, next.h, next.w * 4);
-        if (overlap >= unsigned(next.h)) {
-            if (automatic && ++stationary >= 2) {
-                finish();
+        if (hide)
+            ShowWindow(bar, SW_SHOWNOACTIVATE);
+        if (!valid) {
+            label(L"请恢复所选网页，保持选区在原位置。");
+            return Match::Obstructed;
+        }
+        unsigned seam = 0;
+        unsigned overlap =
+            ps_scroll_match(previous.px.data(), next.px.data(), next.w, next.h, next.w * 4, &seam);
+        if (overlap >= unsigned(next.h))
+            return Match::Same;
+        if (!overlap) {
+            label(L"未对齐：请向上滚回一小段，保留两屏重叠的正文");
+            return Match::Unmatched;
+        }
+        int added = next.h - int(overlap);
+        if (merged.h + added > 32767 || uint64_t(merged.h + added) * next.w > 64000000) {
+            automatic = false;
+            atLimit = true;
+            EnableWindow(GetDlgItem(bar, ToggleAuto), FALSE);
+            label(L"已到图像尺寸上限，请完成当前长图。");
+            return Match::Limit;
+        }
+        // Join inside the overlapping content. Replacing the bottom portion of the old
+        // viewport prevents a sticky browser footer from appearing at every join.
+        const size_t stride = size_t(next.w) * 4;
+        const size_t required = size_t(merged.h + added) * stride;
+        if (merged.px.capacity() < required) {
+            const size_t capacity = merged.px.capacity();
+            const size_t upper = std::min<size_t>(size_t(32767) * stride, 64000000ull * 4);
+            merged.px.reserve(std::max(required, std::min(upper, capacity + capacity / 2)));
+        }
+        merged.px.resize(merged.px.size() - size_t(overlap - seam) * stride);
+        merged.px.insert(merged.px.end(), next.px.begin() + seam * stride, next.px.end());
+        merged.h += added;
+        previous = std::move(next);
+        stationary = 0;
+        ++parts;
+        label(L"已拼接 " + std::to_wstring(parts) + L" 帧 · " + std::to_wstring(merged.h) + L" 像素高");
+        return Match::Added;
+    }
+    void completeLong() {
+        Match match = atLimit ? Match::Limit : sample();
+        if (parts < 2) {
+            label(L"只有首屏：请先滚动选区内的正文，看到拼接高度后再完成。");
+            return;
+        }
+        if (match == Match::Unmatched || match == Match::Obstructed) {
+            const bool wasAuto = automatic;
+            KillTimer(bar, 1);
+            int response = MessageBoxW(bar, L"最后这一屏尚未对齐。仅编辑已经拼接成功的部分？",
+                                       L"确认长截图", MB_YESNO | MB_ICONQUESTION);
+            if (response != IDYES) {
+                setAuto(wasAuto);
+                SetTimer(bar, 1, 130, nullptr);
                 return;
             }
-            label(L"画面尚未变化，可滚动后继续或完成。");
-            return;
         }
-        if (!overlap) {
-            automatic = false;
-            KillTimer(bar, 1);
-            label(L"未找到重叠区域，请向上退一点后手动加入。");
-            return;
-        }
-        stationary = 0;
-        size_t offset = size_t(overlap) * next.w * 4;
-        int append = next.h - int(overlap);
-        if (merged.h + append > 32767 || uint64_t(merged.h + append) * next.w > 64000000) {
-            automatic = false;
-            KillTimer(bar, 1);
-            label(L"已到此张图片的尺寸上限，请完成长截图。");
-            return;
-        }
-        merged.px.insert(merged.px.end(), next.px.begin() + offset, next.px.end());
-        merged.h += append;
-        previous = std::move(next);
-        parts++;
-        label(L"已拼接 " + std::to_wstring(parts) + L" 屏 · " + std::to_wstring(merged.h) + L" 像素高");
+        finish();
     }
     void cleanup() {
         if (overlay) {
@@ -304,7 +443,7 @@ class Capture {
             if (abs(p.x - center.x) < 10 && abs(p.y - center.y) < 10)
                 SetCursorPos(formerPointer.x, formerPointer.y);
         }
-        restoredPointer = issuedWheel = dragging = false;
+        restoredPointer = dragging = selected = automatic = atLimit = false;
         stationary = 0;
         screen = {};
         previous = {};
@@ -325,8 +464,9 @@ class Capture {
         require(!active(), "已有截图正在进行。");
         registerClass(L"CiXiaSelect", selectProc, LoadCursorW(nullptr, IDC_CROSS));
         registerClass(L"CiXiaScroll", barProc);
-        longMode = longShot;
-        automatic = autoScroll;
+        longMode = false;
+        startInScroll = longShot;
+        autoRequested = autoScroll;
         finished = std::move(done);
         cancelled = std::move(cancel);
         total = wholeScreen();
@@ -346,51 +486,110 @@ class Capture {
             cancelled();
     }
 };
+struct PinSurface {
+    Frame pixels;
+    std::function<void(HWND)> closed;
+};
 inline LRESULT CALLBACK pinProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    auto *f = (Frame *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if (msg == WM_NCCREATE) {
-        f = (Frame *)((CREATESTRUCTW *)lp)->lpCreateParams;
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)f);
+    auto *surface = reinterpret_cast<PinSurface *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!surface)
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    auto &f = surface->pixels;
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE:
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_SIZING: {
+        // Keep the proportions on a corner drag. Very tall screenshots still have
+        // a usable title bar: their image is fitted inside the minimum window.
+        if (wp != WMSZ_TOPLEFT && wp != WMSZ_TOPRIGHT && wp != WMSZ_BOTTOMLEFT && wp != WMSZ_BOTTOMRIGHT)
+            break;
+        RECT before{}, client{};
+        GetWindowRect(hwnd, &before);
+        GetClientRect(hwnd, &client);
+        RECT &next = *reinterpret_cast<RECT *>(lp);
+        const int borderW = before.right - before.left - client.right;
+        const int borderH = before.bottom - before.top - client.bottom;
+        int w = std::max<int>(1, next.right - next.left - borderW);
+        int h = std::max<int>(1, next.bottom - next.top - borderH);
+        const bool horizontal = abs(w - client.right) * double(std::max<LONG>(1, client.bottom)) >
+                                abs(h - client.bottom) * double(std::max<LONG>(1, client.right));
+        const double scale = horizontal ? double(w) / f.w : double(h) / f.h;
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        int maxW = std::max<int>(1, mi.rcWork.right - mi.rcWork.left - borderW);
+        int maxH = std::max<int>(1, mi.rcWork.bottom - mi.rcWork.top - borderH);
+        w = std::clamp<int>(int(f.w * scale + 0.5), std::min(94, maxW), maxW) + borderW;
+        h = std::clamp<int>(int(f.h * scale + 0.5), std::min(48, maxH), maxH) + borderH;
+        if (wp == WMSZ_TOPLEFT || wp == WMSZ_BOTTOMLEFT)
+            next.left = next.right - w;
+        else
+            next.right = next.left + w;
+        if (wp == WMSZ_TOPLEFT || wp == WMSZ_TOPRIGHT)
+            next.top = next.bottom - h;
+        else
+            next.bottom = next.top + h;
+        return TRUE;
     }
-    if (msg == WM_PAINT && f) {
+    case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         RECT r;
         GetClientRect(hwnd, &r);
         FillRect(dc, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        double z = std::min(double(r.right) / f->w, double(r.bottom) / f->h);
-        int w = std::max(1, (int)(f->w * z)), h = std::max(1, (int)(f->h * z));
-        RECT dst{(r.right - w) / 2, (r.bottom - h) / 2, (r.right + w) / 2, (r.bottom + h) / 2};
-        drawFrame(dc, *f, dst, {0, 0, f->w, f->h});
+        double z = std::min(double(r.right) / f.w, double(r.bottom) / f.h);
+        int w = std::max(1, int(f.w * z)), h = std::max(1, int(f.h * z));
+        int x = (r.right - w) / 2, y = (r.bottom - h) / 2;
+        drawFrame(dc, f, {x, y, x + w, y + h}, {0, 0, f.w, f.h});
         EndPaint(hwnd, &ps);
         return 0;
     }
-    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
-        DestroyWindow(hwnd);
-        return 0;
-    }
-    if (msg == WM_LBUTTONDOWN) {
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_LBUTTONDOWN:
         ReleaseCapture();
         SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
         return 0;
-    }
-    if (msg == WM_NCDESTROY) {
-        delete f;
+    case WM_NCDESTROY:
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        if (surface->closed)
+            surface->closed(hwnd);
+        delete surface;
+        break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
-inline void pinImage(Frame frame) {
+inline HWND pinImage(Frame frame, const wstring &title = L"词匣 · 置顶截图", size_t ordinal = 0,
+                     std::function<void(HWND)> closed = {}) {
     registerClass(L"CiXiaPin", pinProc);
-    double scale = std::min({1.0, 760.0 / frame.w, 560.0 / frame.h});
-    int w = std::max(140, int(frame.w * scale)), h = std::max(90, int(frame.h * scale));
+    POINT point;
+    GetCursorPos(&point);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &mi);
+    RECT work = mi.rcWork;
+    double z = std::min(
+        {1.0, (work.right - work.left) * 0.47 / frame.w, (work.bottom - work.top) * 0.68 / frame.h});
+    int w = std::max(94, int(frame.w * z)), h = std::max(48, int(frame.h * z));
+    constexpr DWORD style = WS_OVERLAPPEDWINDOW, ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
     RECT rect{0, 0, w, h};
-    AdjustWindowRectEx(&rect, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
-    auto *f = new Frame(std::move(frame));
-    HWND wnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CiXiaPin", L"词匣 · 置顶截图",
-                               WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left,
-                               rect.bottom - rect.top, nullptr, nullptr, instance(), f);
-    if (!wnd)
-        throw std::runtime_error("置顶窗口创建失败。");
+    AdjustWindowRectEx(&rect, style, FALSE, ex);
+    int width = rect.right - rect.left, height = rect.bottom - rect.top;
+    int offset = int(ordinal % 8) * 32;
+    int x =
+        std::clamp<int>(work.left + 30 + offset, work.left, std::max<int>(work.left, work.right - width));
+    int y =
+        std::clamp<int>(work.top + 48 + offset, work.top, std::max<int>(work.top, work.bottom - height));
+    auto surface = std::make_unique<PinSurface>(PinSurface{std::move(frame), std::move(closed)});
+    HWND wnd = CreateWindowExW(ex, L"CiXiaPin", title.c_str(), style, x, y, width, height, nullptr, nullptr,
+                               instance(), nullptr);
+    require(wnd, "置顶窗口创建失败。");
+    SetWindowLongPtrW(wnd, GWLP_USERDATA, (LONG_PTR)surface.release());
     ShowWindow(wnd, SW_SHOWNOACTIVATE);
+    return wnd;
 }

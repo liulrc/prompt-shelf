@@ -51,6 +51,26 @@ inline void makeThumbnail(const fs::path &source, const fs::path &target) {
         DeleteObject(bm);
     }
 }
+// Called with the system clipboard locked by ClipboardGuard.
+inline void setImageFormats(const Frame &pixels, const Bytes &png) {
+    auto info = frameInfo(pixels.w, pixels.h);
+    Bytes dib(sizeof(BITMAPINFOHEADER) + pixels.px.size());
+    memcpy(dib.data(), &info.bmiHeader, sizeof(BITMAPINFOHEADER));
+    memcpy(dib.data() + sizeof(BITMAPINFOHEADER), pixels.px.data(), pixels.px.size());
+    setClipboardBytes(CF_DIB, dib.data(), dib.size());
+    if (!png.empty())
+        setClipboardBytes(RegisterClipboardFormatW(L"PNG"), png.data(), png.size());
+}
+inline void copyImage(HWND window, const Frame &frame, const Bytes &png) {
+    ClipboardGuard guard(window);
+    require(EmptyClipboard(), "剪贴板写入失败。");
+    setImageFormats(frame, png);
+}
+inline bool isCapture(const Json &row) {
+    // Version 1.0 marked captures and saved annotations with this source label.
+    return row.value("type", "") == "image" &&
+           (row.value("capture", false) || row.value("source", "") == "截图工具");
+}
 class Archive {
     fs::path folder, media, index;
     Json rows = Json::array();
@@ -74,7 +94,8 @@ class Archive {
     fs::path managed(const string &name) const {
         require(!name.empty() &&
                     name.find_first_not_of(
-                        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") == string::npos &&
+                        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") ==
+                        string::npos &&
                     name != "." && name != "..",
                 "无效的媒体路径。");
         return media / wide(name);
@@ -162,6 +183,13 @@ class Archive {
             out.push_back(exposed(r));
         return out;
     }
+    Json captureList() const {
+        Json out = Json::array();
+        for (const auto &row : rows)
+            if (isCapture(row))
+                out.push_back(exposed(row));
+        return out;
+    }
     Json text(string value, string title, string source) {
         require(!value.empty(), "剪贴板文字为空。");
         require(value.size() <= limit, "单条文字超过 64 MiB。");
@@ -188,13 +216,14 @@ class Archive {
                     {"size", value.size()}});
     }
     Json binary(const Bytes *data, const fs::path *sourcePath, string type, string mime, string filename,
-                string title, string source, bool fileCopy = false) {
+                string title, string source, bool fileCopy = false, int frameHeight = 0) {
         require(type == "image" || type == "video", "仅支持图片和视频文件。");
         string id = genId();
         filename = filenameOnly(filename);
         wstring ext = fs::path(wide(filename)).extension().wstring();
-        bool safe = ext.size() > 1 && ext.size() < 10 &&
-                    std::all_of(ext.begin() + 1, ext.end(), [](wchar_t c) { return c < 128 && iswalnum(c); });
+        bool safe =
+            ext.size() > 1 && ext.size() < 10 &&
+            std::all_of(ext.begin() + 1, ext.end(), [](wchar_t c) { return c < 128 && iswalnum(c); });
         if (!safe)
             ext = type == "image" ? L".png" : L".mp4";
         string stored = id + utf(ext), thumb = id + ".thumb.png";
@@ -213,6 +242,8 @@ class Archive {
                   {"createdAt", nowIso()},
                   {"stored", stored},
                   {"originFile", fileCopy}};
+        if (type == "image" && source == "截图工具")
+            r["capture"] = true;
         try {
             if (sourcePath) {
                 require(fs::is_regular_file(*sourcePath), "原文件已移动或无法访问。");
@@ -228,6 +259,15 @@ class Archive {
                 require(data->size() <= limit, "单条媒体超过 64 MiB。大文件可以从资源管理器复制到剪贴板。");
                 writeBytes(path, *data);
                 r["size"] = data->size();
+            }
+            if (isCapture(r)) {
+                Gdiplus::Bitmap dimensions(original(r).c_str());
+                if (dimensions.GetLastStatus() == Gdiplus::Ok) {
+                    r["width"] = dimensions.GetWidth();
+                    r["height"] = dimensions.GetHeight();
+                    if (frameHeight > 0)
+                        r["frameHeight"] = std::min<unsigned>(frameHeight, dimensions.GetHeight());
+                }
             }
             makeThumbnail(original(r), thumbPath);
             if (type == "image" && !fs::exists(thumbPath)) {
@@ -285,7 +325,7 @@ class Archive {
     Frame pinFrame(string id) const {
         if (id.empty()) {
             for (auto &r : rows)
-                if (r["type"] == "image" && r.value("source", "").find("截图") != string::npos) {
+                if (isCapture(r)) {
                     id = r["id"];
                     break;
                 }
@@ -427,14 +467,7 @@ class Archive {
             memcpy(payload.data() + sizeof(DROPFILES), name.c_str(), (name.size() + 1) * sizeof(wchar_t));
             setClipboardBytes(CF_HDROP, payload.data(), payload.size());
         }
-        if (!pixels.px.empty()) {
-            auto info = frameInfo(pixels.w, pixels.h);
-            Bytes dib(sizeof(BITMAPINFOHEADER) + pixels.px.size());
-            memcpy(dib.data(), &info.bmiHeader, sizeof(BITMAPINFOHEADER));
-            memcpy(dib.data() + sizeof(BITMAPINFOHEADER), pixels.px.data(), pixels.px.size());
-            setClipboardBytes(CF_DIB, dib.data(), dib.size());
-            if (!png.empty())
-                setClipboardBytes(RegisterClipboardFormatW(L"PNG"), png.data(), png.size());
-        }
+        if (!pixels.px.empty())
+            setImageFormats(pixels, png);
     }
 };

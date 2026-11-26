@@ -56,9 +56,14 @@ final class Archive {
   private func bind(_ text: String, _ stmt: OpaquePointer, _ pos: Int32) {
     sqlite3_bind_text(stmt, pos, text, -1, transient)
   }
-  private func rows(id: String? = nil) throws -> [Object] {
-    let st = try statement(
-      "SELECT json FROM items " + (id == nil ? "ORDER BY seq DESC" : "WHERE id=?"))
+  private func rows(id: String? = nil, capturesOnly: Bool = false) throws -> [Object] {
+    // Older releases already wrote this signature prefix. Read only screenshot
+    // rows so opening the gallery doesn't deserialize clipboard text and videos.
+    let selection =
+      capturesOnly
+      ? "WHERE signature GLOB 'image-capture:*' ORDER BY seq DESC"
+      : (id == nil ? "ORDER BY seq DESC" : "WHERE id=?")
+    let st = try statement("SELECT json FROM items " + selection)
     defer { sqlite3_finalize(st) }
     if let id { bind(id, st, 1) }
     var items = [Object]()
@@ -96,8 +101,8 @@ final class Archive {
     guard fm.isReadableFile(atPath: url.path) else { throw AppIssue("原文件已移动或无法读取。") }
     return url
   }
-  func lastCapture() throws -> Object? {
-    try rows().first { $0["type"] as? String == "image" && $0["capture"] as? Bool == true }
+  func captures() throws -> [Object] {
+    try rows(capturesOnly: true).map(publicRow)
   }
   @discardableResult func add(
     _ input: Object, capture: Bool = false, trustedFileReference: Bool = false
@@ -114,6 +119,11 @@ final class Archive {
         ?? (type == "text" ? "text/plain" : type == "image" ? "image/png" : "video/mp4"),
       "isDemo": false, "capture": capture, "createdAt": ISO8601DateFormatter().string(from: Date()),
     ]
+    if capture {
+      for field in ["width", "height", "frameHeight"] {
+        if let value = input[field] as? Int, value > 0 { r[field] = value }
+      }
+    }
     let data: Data
     var target: URL?
     var sourceFile: URL?

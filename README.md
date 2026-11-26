@@ -2,14 +2,14 @@
 
 词匣用于复用提示词、找回复制过的内容，以及截取、标注和置顶屏幕图片。
 
-## 安装桌面版 1.0.0
+## 安装桌面版 1.1.0
 
 | 平台 | 安装包 |
 | --- | --- |
-| macOS 14 及以上，Apple Silicon 或 Intel | [词匣通用 DMG](dist/PromptShelf-1.0.0-macOS-universal.dmg) |
-| Windows 10 1809 及以上、Windows 11，x64 | [词匣安装程序](dist/CiXia-1.0.0-Windows-x64-Setup.exe) |
+| macOS 14 及以上，Apple Silicon 或 Intel | [词匣通用 DMG](dist/PromptShelf-1.1.0-macOS-universal.dmg) |
+| Windows 10 1809 及以上、Windows 11，x64 | [词匣安装程序](dist/CiXia-1.1.0-Windows-x64-Setup.exe) |
 
-默认使用 Option（Windows 为 Alt）加 **A** 框选截图、加 **Q** 打开剪贴板卡片、加 **Z** 置顶最近截图、加 **X** 打开「我的模板」。四个组合均可在独立设置窗口中修改。从菜单栏或系统托盘选择「滚动长截图」可以直接开始自动滚动拼接。
+默认使用 Option（Windows 为 Alt）加 **A** 框选截图、加 **Q** 打开剪贴板卡片、加 **Z** 打开近期截图库并多选置顶、加 **X** 打开「我的模板」。四个组合均可在独立设置窗口中修改。框选后可以选择普通截图或滚动长截图。截图在独立窗口完整显示，支持框线、箭头与文字标注。每张置顶图均可独立拖动、缩放和关闭。
 
 [桌面版使用说明与验证记录](docs/桌面版使用说明.md) · [安装包校验值](dist/SHA256SUMS.txt)
 

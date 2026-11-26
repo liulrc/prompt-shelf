@@ -8,7 +8,7 @@
   const hotkeys = document.querySelector('#hotkeys');
   const actions = [
     ['capture', '截取屏幕', 'Alt+A'], ['shelf', '剪贴板历史栏', 'Alt+Q'],
-    ['pin', '截图置顶', 'Alt+Z'], ['templates', '我的提示词', 'Alt+X']
+    ['pin', '近期截图库', 'Alt+Z'], ['templates', '我的提示词', 'Alt+X']
   ];
   const modifiers = ['Alt','Ctrl','Shift','Ctrl+Alt','Ctrl+Shift','Alt+Shift','Ctrl+Alt+Shift'];
   const keys = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...Array.from({length:12}, (_,i) => 'F' + (i + 1))];

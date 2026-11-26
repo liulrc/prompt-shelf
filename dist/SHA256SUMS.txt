@@ -1,2 +1,4 @@
-a8a425edbc5c8d4255d1c46bf75cd6f8e500d859812b016116484f7ca6e6d7ce  PromptShelf-1.0.0-macOS-universal.dmg
 6a1e4966d0f487fd516b80a9ba694c56f84d855c87d6b7751c2add0b85d9b9a5  CiXia-1.0.0-Windows-x64-Setup.exe
+fa0a76fd6c8a2b13673e83500dcc3ca4f2c3757ccf56b02c307710e03c0d60b1  CiXia-1.1.0-Windows-x64-Setup.exe
+a8a425edbc5c8d4255d1c46bf75cd6f8e500d859812b016116484f7ca6e6d7ce  PromptShelf-1.0.0-macOS-universal.dmg
+dbdcbeb3804bd2988639987f75d2388b1d4296b0f9eb293c959671e3751e0f1e  PromptShelf-1.1.0-macOS-universal.dmg
