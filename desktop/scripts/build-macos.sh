@@ -25,6 +25,6 @@ lipo -create "$build/PromptShelf-arm64" "$build/PromptShelf-x86_64" -output "$ex
 codesign --force --sign "${MAC_SIGN_IDENTITY:--}" "$app"
 codesign --verify --strict --deep "$app"
 ln -s /Applications "$stage/Applications"
-hdiutil create -quiet -ov -fs HFS+ -format UDZO -volname "词匣" -srcfolder "$stage" "$dist/PromptShelf-1.2.0-macOS-universal.dmg"
-hdiutil verify "$dist/PromptShelf-1.2.0-macOS-universal.dmg" >/dev/null
-echo "$dist/PromptShelf-1.2.0-macOS-universal.dmg"
+hdiutil create -quiet -ov -fs HFS+ -format UDZO -volname "词匣" -srcfolder "$stage" "$dist/PromptShelf-1.3.0-macOS-universal.dmg"
+hdiutil verify "$dist/PromptShelf-1.3.0-macOS-universal.dmg" >/dev/null
+echo "$dist/PromptShelf-1.3.0-macOS-universal.dmg"

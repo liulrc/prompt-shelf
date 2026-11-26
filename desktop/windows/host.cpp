@@ -1,9 +1,11 @@
 #include "archive.hpp"
+#include "ai.hpp"
 #include "panel.hpp"
 #include "shelf.hpp"
 #include <set>
 #include <sstream>
 #include <cwctype>
+#include <mutex>
 
 static const std::array<string, 4> actions = {"capture", "shelf", "pin", "templates"};
 static const Json defaults = {
@@ -35,10 +37,46 @@ static std::pair<UINT, UINT> chord(const string &value) {
     require(bool(mod && key), "请选择修饰键和主键。");
     return {mod, key};
 }
+// The pool handles blocking WinHTTP calls. Only the window thread uses a WebView or Panel.
+constexpr UINT aiReadyMessage = WM_APP + 4;
+struct AiReply {
+    std::weak_ptr<Panel> panel;
+    Json message;
+};
+struct AiMailbox {
+    std::mutex lock;
+    HWND owner = nullptr;
+    std::vector<AiReply> replies;
+};
+struct AiJob {
+    std::shared_ptr<AiMailbox> mailbox;
+    std::weak_ptr<Panel> panel;
+    Json id;
+    std::function<Json()> perform;
+    static void CALLBACK run(PTP_CALLBACK_INSTANCE, void *context) noexcept {
+        std::unique_ptr<AiJob> job(static_cast<AiJob *>(context));
+        try {
+            Json message = {{"id", job->id}};
+            try {
+                message["result"] = job->perform();
+            } catch (const std::exception &e) {
+                message["error"] = e.what();
+            }
+            std::lock_guard<std::mutex> guard(job->mailbox->lock);
+            if (job->mailbox->owner) {
+                job->mailbox->replies.push_back({job->panel, std::move(message)});
+                PostMessageW(job->mailbox->owner, aiReadyMessage, 0, 0);
+            }
+        } catch (...) {
+        }
+    }
+};
 class Application {
     using Chord = std::pair<UINT, UINT>;
     fs::path home = localDir(), resources = exeDir() / L"www";
     Archive archive{home};
+    fs::path aiSettingsFile = home / L"ai-settings.json";
+    std::shared_ptr<AiMailbox> aiMail = std::make_shared<AiMailbox>();
     Capture capture;
     NativeShelf shelf{archive, [this](const string &id) {
                           archive.writeToClipboard(root, id);
@@ -68,6 +106,12 @@ class Application {
         wcsncpy_s(tray.szInfo, wide(message).c_str(), _TRUNCATE);
         tray.dwInfoFlags = NIIF_INFO;
         Shell_NotifyIconW(NIM_MODIFY, &tray);
+    }
+    void captureIssue(const string &message) {
+        if (trayVisible)
+            notify(message);
+        else
+            MessageBoxW(nullptr, wide(message).c_str(), L"词匣 · 截图", MB_OK | MB_ICONWARNING);
     }
     void setTrayVisible(bool visible, bool startup = false) {
         if (visible == trayVisible)
@@ -259,26 +303,26 @@ class Application {
             throw;
         }
     }
-    void save(Panel &panel, const Json &p) {
-        wstring base = fs::path(wide(p.value("filename", "capture.png"))).filename().wstring();
+    bool save(HWND owner, const wstring &base, bool png,
+              const std::function<void(const fs::path &)> &write) {
         wchar_t path[32768]{};
         wcsncpy_s(path, base.c_str(), _TRUNCATE);
         OPENFILENAMEW picker{sizeof(picker)};
-        picker.hwndOwner = panel.hwnd;
+        picker.hwndOwner = owner;
         picker.lpstrTitle = L"导出到文件";
         picker.lpstrFile = path;
         picker.nMaxFile = 32768;
-        picker.lpstrFilter = L"所有文件\0*.*\0\0";
+        picker.lpstrFilter = png ? L"PNG 图片\0*.png\0\0" : L"所有文件\0*.*\0\0";
+        if (png)
+            picker.lpstrDefExt = L"png";
         picker.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         if (!GetSaveFileNameW(&picker)) {
-            throw std::runtime_error(CommDlgExtendedError() ? "无法打开保存对话框。" : "已取消导出。");
+            require(!CommDlgExtendedError(), "无法打开保存对话框。");
+            return false;
         }
         fs::path dest = path, temp = dest.parent_path() / wide("." + genId() + ".tmp");
         try {
-            if (p.contains("id"))
-                archive.exportFile(p.at("id"), temp);
-            else
-                writeBytes(temp, from64(p.at("data")));
+            write(temp);
             require(
                 MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
                 "文件写入失败。");
@@ -287,6 +331,18 @@ class Application {
             fs::remove(temp, ec);
             throw;
         }
+        return true;
+    }
+    void save(Panel &panel, const Json &p) {
+        const auto filename = fs::path(wide(p.value("filename", "capture.png"))).filename();
+        require(save(panel.hwnd, filename.wstring(), filename.extension() == L".png",
+                     [&](const fs::path &temp) {
+                         if (p.contains("id"))
+                             archive.exportFile(p.at("id"), temp);
+                         else
+                             writeBytes(temp, from64(p.at("data")));
+                     }),
+                "已取消导出。");
     }
     void requestCapture(bool isLong, bool automatic) {
         require(!queuedCapture && !capture.active(), "已有截图正在进行。");
@@ -365,7 +421,7 @@ class Application {
         try {
             capture.start(
                 wantLong, wantAuto,
-                [this](Frame &&f) {
+                [this](Frame &&f, CaptureOutput output) {
                     try {
                         Bytes png = encodeFrame(f);
                         string title = f.h > capture.frameHeight() ? "滚动长截图" : "屏幕截图";
@@ -384,19 +440,30 @@ class Application {
                             changed();
                         } catch (const std::exception &e) {
                             image["archiveError"] = e.what();
-                            notify(string("原图已进入编辑器，未加入历史：") + e.what());
+                            captureIssue(string("截图未加入历史：") + e.what());
                         }
-                        try {
-                            copyImage(root, f, png);
-                            lastSeq = GetClipboardSequenceNumber();
-                        } catch (...) {
-                            notify("原图已进入编辑器，系统剪贴板暂时不可写。");
+                        if (output == CaptureOutput::Clipboard || output == CaptureOutput::Editor) {
+                            try {
+                                copyImage(root, f, png);
+                                lastSeq = GetClipboardSequenceNumber();
+                            } catch (...) {
+                                captureIssue("截图未能写入系统剪贴板，请在近期截图库重试。");
+                            }
                         }
-                        image["data"] = to64(png);
-                        editImage(std::move(image), true);
+                        if (output == CaptureOutput::Editor) {
+                            image["data"] = to64(png);
+                            editImage(std::move(image), true);
+                        } else {
+                            restore();
+                            if (output == CaptureOutput::File)
+                                save(nullptr, wide(title + ".png"), true,
+                                     [&](const fs::path &p) { writeBytes(p, png); });
+                            if (output == CaptureOutput::Pin)
+                                showPin(image.value("id", genId()), std::move(f), title);
+                        }
                     } catch (const std::exception &e) {
                         restore();
-                        notify(e.what());
+                        captureIssue(e.what());
                     }
                 },
                 [this]() { restore(); });
@@ -453,6 +520,49 @@ class Application {
             }
         }
     }
+    void startAiJob(Panel &panel, const Json &id, std::function<Json()> perform) {
+        auto job = std::make_unique<AiJob>(AiJob{aiMail, panel.weak_from_this(), id, std::move(perform)});
+        require(TrySubmitThreadpoolCallback(AiJob::run, job.get(), nullptr), "系统无法启动模型请求。");
+        job.release();
+    }
+    void aiMessage(Panel &p, const string &cmd, const Json &v, const Json &id) {
+        const bool main = p.kind == "main", settingsWindow = p.kind == "settings";
+        require(main || settingsWindow, "此窗口不支持模型设置。");
+        const ai::Config config = ai::Config::load(aiSettingsFile);
+        if (cmd == "ai.settings.get") {
+            p.post({{"id", id}, {"result", config.publicFields()}});
+            return;
+        }
+        if (cmd == "ai.settings.set") {
+            require(settingsWindow, "请在设置中保存模型接口。");
+            const auto publicConfig = config.save(v, aiSettingsFile).publicFields();
+            p.post({{"id", id}, {"result", publicConfig}});
+            for (const auto &[name, panel] : panels)
+                if (panel->kind == "main" || panel->kind == "settings")
+                    panel->post({{"event", "ai.settings.changed"}, {"data", publicConfig}});
+            return;
+        }
+        if (cmd == "ai.models.list") {
+            require(settingsWindow, "请在设置中获取模型列表。");
+            ai::Endpoint endpoint(v.at("baseURL").get<string>());
+            auto key = config.keyFor(endpoint, v);
+            startAiJob(p, id, [endpoint = std::move(endpoint), key = std::move(key)] {
+                return ai::listResult(ai::fetch(endpoint, key, "/models", {}));
+            });
+            return;
+        }
+        require(main && cmd == "ai.optimize", "此窗口不支持此模型操作。");
+        ai::Endpoint endpoint(config.base);
+        const string model = v.at("model").get<string>();
+        require(std::find(config.models.begin(), config.models.end(), model) != config.models.end(),
+                "请在设置中选择此模型。");
+        auto body = ai::optimizeBody(model, v.at("text").get<string>()).dump();
+        auto key = config.keyFor(endpoint, Json::object());
+        startAiJob(
+            p, id, [endpoint = std::move(endpoint), key = std::move(key), body = std::move(body), model] {
+                return ai::optimizeResult(ai::fetch(endpoint, key, "/chat/completions", body), model);
+            });
+    }
     void message(Panel &p, const Json &m) {
         if (!m.contains("id") || !m.contains("command"))
             return;
@@ -461,6 +571,10 @@ class Application {
         try {
             string cmd = m.at("command");
             Json v = m.value("payload", Json::object());
+            if (cmd.rfind("ai.", 0) == 0) {
+                aiMessage(p, cmd, v, id);
+                return;
+            }
             if (cmd == "settings.get")
                 result = settings;
             else if (cmd == "settings.set") {
@@ -539,7 +653,7 @@ class Application {
                 string area = v.value("area", "main");
                 require(area == "main" || area == "settings" || area == "shelf" || area == "personal" ||
                             area == "clipboard" || area == "capture" || area == "builtin" ||
-                            area == "editor" || area == "gallery",
+                            area == "editor" || area == "gallery" || area == "optimize",
                         "窗口不存在。");
                 if (area == "editor")
                     editImage(archive.details(v.at("id")));
@@ -596,6 +710,17 @@ class Application {
                 setTrayVisible(settings.value("showTrayIcon", true), true);
                 return 0;
             }
+            if (msg == aiReadyMessage) {
+                std::vector<AiReply> replies;
+                {
+                    std::lock_guard<std::mutex> guard(aiMail->lock);
+                    replies.swap(aiMail->replies);
+                }
+                for (auto &reply : replies)
+                    if (auto panel = reply.panel.lock(); panel && panel->hwnd)
+                        panel->post(reply.message);
+                return 0;
+            }
             if (msg == WM_APP + 3) {
                 open("main");
                 return 0;
@@ -642,6 +767,11 @@ class Application {
             }
             if (msg == WM_DESTROY) {
                 exiting = true;
+                {
+                    std::lock_guard<std::mutex> guard(aiMail->lock);
+                    aiMail->owner = nullptr;
+                    aiMail->replies.clear();
+                }
                 shelf.dismiss(false);
                 hidden.clear();
                 if(capture.active()) capture.stop();
@@ -690,6 +820,7 @@ class Application {
             std::ifstream f(home / L"settings.json");
             settings = Json::parse(f);
         }
+        aiMail->owner = root;
         apply(settings, true);
         open("main");
         MSG msg{};

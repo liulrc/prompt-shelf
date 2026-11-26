@@ -110,6 +110,11 @@ h1,h2,h3,p { margin:0; }
 .side-shelf:hover { background:#353b34; }
 .side-shelf kbd { margin-left:auto; color:#cdd4c2; border-color:#586050; background:#353b34; }
 .side-shelf + .side-foot { margin-top:0; }
+@media(min-width:731px) and (max-height:720px) {
+  .sidebar {overflow-y:auto;}
+  .sidebar nav {margin-top:22px;}
+  .nav-group.next {margin-top:16px;}
+}
 @media(max-width:730px) {
   .sidebar nav { flex-wrap:wrap; }
   .side-shelf { display:none; }

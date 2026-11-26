@@ -17,6 +17,8 @@ inline void registerClass(const wchar_t *name, WNDPROC proc, HCURSOR cursor = nu
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
         throw std::runtime_error("创建窗口类型失败。");
 }
+enum class CaptureOutput { Editor, Clipboard, File, Pin };
+
 class Capture {
     Frame screen, previous, merged;
     RECT total{}, region{}, selection{};
@@ -25,11 +27,12 @@ class Capture {
     bool dragging = false, selected = false, longMode = false, automatic = false, restoredPointer = false;
     bool startInScroll = false, autoRequested = false, barOverlaps = false, atLimit = false;
     ULONGLONG lastWheel = 0, lastSample = 0;
-    enum Control { Edit = 1, Scroll, Cancel, Finish, ToggleAuto, Status };
+    enum Control { Edit = 1, Scroll, Cancel, Finish, ToggleAuto, Status, Copy, Save, Pin };
+    static constexpr int escapeKey = 300;
     enum class Match { Same, Added, Unmatched, Obstructed, Limit };
     int parts = 0, stationary = 0;
     wstring status;
-    std::function<void(Frame &&)> finished;
+    std::function<void(Frame &&, CaptureOutput)> finished;
     std::function<void()> cancelled;
     static LRESULT CALLBACK selectProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto *self = (Capture *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -137,7 +140,16 @@ class Capture {
             return DefWindowProcW(hwnd, msg, wp, lp);
         try {
             switch (msg) {
+            case WM_HOTKEY:
+                if (wp == escapeKey)
+                    s->stop();
+                return 0;
+            case WM_DESTROY:
+                UnregisterHotKey(hwnd, escapeKey);
+                break;
             case WM_TIMER:
+                if (wp == 2 && (GetAsyncKeyState(VK_ESCAPE) & 0x8000))
+                    s->stop();
                 if (wp == 1)
                     s->tick();
                 return 0;
@@ -157,6 +169,18 @@ class Capture {
                 case Finish:
                     s->completeLong();
                     break;
+                case Copy:
+                case Save:
+                case Pin: {
+                    const auto output = LOWORD(wp) == Copy   ? CaptureOutput::Clipboard
+                                        : LOWORD(wp) == Save ? CaptureOutput::File
+                                                             : CaptureOutput::Pin;
+                    if (s->longMode)
+                        s->completeLong(output);
+                    else
+                        s->finish(output);
+                    break;
+                }
                 case ToggleAuto:
                     s->setAuto(!s->automatic);
                     break;
@@ -179,13 +203,11 @@ class Capture {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
     POINT middle() const { return {(region.left + region.right) / 2, (region.top + region.bottom) / 2}; }
-    void placeToolbar() {
+    void placeToolbar(int w, int h) {
         MONITORINFO mi{sizeof(mi)};
         GetMonitorInfoW(MonitorFromPoint(middle(), MONITOR_DEFAULTTONEAREST), &mi);
         const RECT work = mi.rcWork;
-        const auto dpi = GetDpiForWindow(overlay ? overlay : bar);
-        const int w = std::min<int>(MulDiv(456, dpi ? dpi : 96, 96), work.right - work.left);
-        const int h = MulDiv(82, dpi ? dpi : 96, 96);
+
         int x = std::clamp<int>(region.left, work.left, work.right - w);
         int y = region.bottom + 4;
         if (y + h > work.bottom)
@@ -203,10 +225,10 @@ class Capture {
         barOverlaps = IntersectRect(&intersection, &barRect, &region);
         SetWindowPos(bar, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
-    void button(int id, const wchar_t *name, int x, int w) {
+    void button(int id, const wchar_t *name, int x, int y, int w) {
         const auto dpi = GetDpiForWindow(bar);
         auto px = [&](int d) { return MulDiv(d, dpi, 96); };
-        HWND b = CreateWindowW(L"BUTTON", name, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE, px(x), px(37), px(w),
+        HWND b = CreateWindowW(L"BUTTON", name, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE, px(x), px(y), px(w),
                                px(31), bar, (HMENU)(INT_PTR)id, instance(), nullptr);
         SendMessageW(b, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
     }
@@ -217,21 +239,33 @@ class Capture {
                               L"截图工具栏", WS_POPUP | WS_BORDER, region.left, region.top, 1, 1, nullptr,
                               nullptr, instance(), this);
         require(bar, "无法打开截图工具栏。");
-        placeToolbar();
         UINT dpi = GetDpiForWindow(bar);
-        HWND note = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, MulDiv(10, dpi, 96),
-                                  MulDiv(8, dpi, 96), MulDiv(435, dpi, 96), MulDiv(24, dpi, 96), bar,
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromPoint(middle(), MONITOR_DEFAULTTONEAREST), &monitor);
+        const int width = std::min(510, MulDiv(monitor.rcWork.right - monitor.rcWork.left, 96, dpi));
+        int x = 9, y = 35;
+        auto add = [&](int id, const wchar_t *title, int w) {
+            if (x + w + 9 > width && x > 9) {
+                x = 9;
+                y += 36;
+            }
+            button(id, title, x, y, w);
+            x += w + 6;
+        };
+        add(scrolling ? Finish : Edit, scrolling ? L"完成长图并编辑" : L"编辑截图", scrolling ? 118 : 86);
+        add(scrolling ? ToggleAuto : Scroll, scrolling ? L"自动滚动" : L"滚动长截图", 100);
+        add(Cancel, L"取消", 58);
+        add(Copy, L"复制", 58);
+        add(Save, L"保存", 58);
+        add(Pin, L"置顶", 58);
+        placeToolbar(MulDiv(width, dpi, 96), MulDiv(y + 41, dpi, 96));
+        HWND note = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, MulDiv(9, dpi, 96),
+                                  MulDiv(7, dpi, 96), MulDiv(width - 18, dpi, 96), MulDiv(23, dpi, 96), bar,
                                   (HMENU)(INT_PTR)Status, instance(), nullptr);
         SendMessageW(note, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-        if (scrolling) {
-            button(ToggleAuto, L"自动滚动", 10, 115);
-            button(Finish, L"完成长图并编辑", 134, 156);
-            button(Cancel, L"取消", 301, 90);
-        } else {
-            button(Edit, L"编辑普通截图", 10, 134);
-            button(Scroll, L"滚动长截图", 153, 136);
-            button(Cancel, L"取消", 301, 90);
-        }
+        // Receive Esc even while the user scrolls the source window. Poll only if another app owns it.
+        if (!RegisterHotKey(bar, escapeKey, MOD_NOREPEAT, VK_ESCAPE))
+            SetTimer(bar, 2, 30, nullptr);
     }
     void choose(RECT r) {
         const int w = r.right - r.left, h = r.bottom - r.top;
@@ -248,7 +282,7 @@ class Capture {
             startScrolling(autoRequested);
         else {
             toolbar(false);
-            label(L"已框选 · 普通截图　Enter 编辑，也可以切换长截图");
+            label(L"已框选 · Enter 编辑，Esc 取消");
         }
     }
     void startScrolling(bool autoScroll) {
@@ -291,10 +325,6 @@ class Capture {
     void tick() {
         if (!longMode || atLimit)
             return;
-        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
-            stop();
-            return;
-        }
         // If the controls couldn't fit outside the selection, a sample briefly
         // hides them. Let mouse-down/up finish on the button before doing that.
         if (barOverlaps) {
@@ -407,7 +437,7 @@ class Capture {
         label(L"已拼接 " + std::to_wstring(parts) + L" 帧 · " + std::to_wstring(merged.h) + L" 像素高");
         return Match::Added;
     }
-    void completeLong() {
+    void completeLong(CaptureOutput output = CaptureOutput::Editor) {
         Match match = atLimit ? Match::Limit : sample();
         if (parts < 2) {
             label(L"只有首屏：请先滚动选区内的正文，看到拼接高度后再完成。");
@@ -416,15 +446,18 @@ class Capture {
         if (match == Match::Unmatched || match == Match::Obstructed) {
             const bool wasAuto = automatic;
             KillTimer(bar, 1);
-            int response = MessageBoxW(bar, L"最后这一屏尚未对齐。仅编辑已经拼接成功的部分？",
+            HWND originalBar = bar;
+            int response = MessageBoxW(bar, L"最后这一屏尚未对齐。继续使用已经拼接成功的部分？",
                                        L"确认长截图", MB_YESNO | MB_ICONQUESTION);
+            if (!bar || bar != originalBar)
+                return;
             if (response != IDYES) {
                 setAuto(wasAuto);
                 SetTimer(bar, 1, 130, nullptr);
                 return;
             }
         }
-        finish();
+        finish(output);
     }
     void cleanup() {
         if (overlay) {
@@ -449,17 +482,17 @@ class Capture {
         previous = {};
         merged = {};
     }
-    void finish() {
+    void finish(CaptureOutput output = CaptureOutput::Editor) {
         Frame result = std::move(merged);
         cleanup();
         if (finished)
-            finished(std::move(result));
+            finished(std::move(result), output);
     }
 
   public:
     int frameHeight() const { return region.bottom - region.top; }
     bool active() const { return overlay || bar; }
-    void start(bool longShot, bool autoScroll, std::function<void(Frame &&)> done,
+    void start(bool longShot, bool autoScroll, std::function<void(Frame &&, CaptureOutput)> done,
                std::function<void()> cancel) {
         require(!active(), "已有截图正在进行。");
         registerClass(L"CiXiaSelect", selectProc, LoadCursorW(nullptr, IDC_CROSS));

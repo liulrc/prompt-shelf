@@ -44,7 +44,7 @@
     '研究':['research','research'], '视频':['video','video'], '文案':['pen','copy'],
     '开发':['code','dev'], '办公':['briefcase','office']
   };
-  const areaNames = { builtin:'附加库', personal:'我的模板', history:'使用历史', clipboard:'剪贴板', capture:'截图工具' };
+  const areaNames = { optimize:'AI 优化提示词', builtin:'附加库', personal:'我的模板', history:'使用历史', clipboard:'剪贴板', capture:'截图工具' };
   const order = ['全部','视频','文案','研究','开发','办公'];
   const root = document.querySelector('#app');
   const state = {area:'builtin', category:'全部', query:'', editing:false};
@@ -52,6 +52,9 @@
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
 
   const shelfKeys = () => desktop ? desktopSettings.hotkeys.shelf : /Mac|iPhone|iPad/.test(navigator.platform) ? '⌥⇧V' : 'Alt+Shift+V';
+  const hasLibrarySearch = area => ['builtin','personal','history'].includes(area);
+  const mountOptimizer = createPromptOptimizer({desktop, icon, escape, copy:trackPromptCopy, notify,
+    edit:body => openEditor({title:'',category:'未分类',body},'new')});
   const isTool = area => area === 'clipboard' || area === 'capture';
   const assets = new Map();
   let archive, disposeTool, closeShelf, openingShelf = false;
@@ -158,13 +161,13 @@
     root.innerHTML = `<div class="app-shell"><aside class="sidebar">
       <div class="brand"><img src="prototype/mark.svg" alt=""><div><div class="brand-name">词匣</div><small>PROMPT SHELF</small></div></div>
       <nav aria-label="工作台导航"><p class="nav-group">模板空间</p>
-        ${navButton('builtin','library',catalog.length)}${navButton('personal','folder',store.listPersonal().length)}
+        ${navButton('optimize','spark',null)}${navButton('personal','folder',store.listPersonal().length)}${navButton('builtin','library',catalog.length)}
         <p class="nav-group next">活动记录</p>${navButton('history','history',null)}
         <p class="nav-group next">桌面工具</p>${navButton('clipboard','clipboard',null)}${navButton('capture','capture',null)}
       ${desktop ? '<button class="nav-item" data-act="settings">'+icon('keyboard',17)+'<span>设置</span></button>' : ''}</nav><button class="side-shelf" data-act="open-shelf" title="打开快捷历史栏">${icon('keyboard',16)} 历史栏 <kbd>${escape(shelfKeys())}</kbd></button><div class="side-foot"><span class="device">${icon('box',19)}</span><div><strong>本地工作区</strong><small>${store.persistent ? '离线可用' : '仅在本次会话中保留'}</small></div></div>
       </aside><div class="workspace"><header class="topbar">
         <div class="crumbs"><span class="crumb-home">工作台</span>${icon('chevron',11)}<b>${areaNames[state.area]}</b>${state.editing ? icon('chevron',11)+'<b>编辑器</b>':''}</div>
-         ${state.editing || isTool(state.area) ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',15)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索当前模板库'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
+         ${state.editing || !hasLibrarySearch(state.area) ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',15)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索当前模板库'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
       </header><main id="content" class="content"></main></div></div>`;
   }
   function categoryIcon(category) {
@@ -216,6 +219,7 @@
   }
   function drawContent() {
     const host = document.querySelector('#content');
+    if (state.area === 'optimize') { mountOptimizer(host); return; }
     if (isTool(state.area)) { mountTool(state.area, host); return; }
     if (state.area === 'history') listHistory(host); else listTemplates(host);
   }
@@ -244,7 +248,7 @@
       (buttons.find(el=>el.dataset.open === lastFocus) || document.querySelector('[data-act="new"]'))?.focus({preventScroll:true});
     };
     window.openPromptEditor({host:document.querySelector('#content'),record,origin,store,notify,copy:trackPromptCopy,icon,escape,
-      onCancel:returnToList,
+      backLabel:state.area === 'optimize' ? '返回优化结果' : '返回列表', onCancel:returnToList,
       onFinish(action) {
         if (action === 'save') { navigate('personal'); notify(store.persistent ? '已保存到「我的模板」' : '已暂存到本次会话，关闭页面后可能丢失'); }
         else { returnToList(); notify(store.persistent ? '已复制到剪贴板，可在使用历史中查看' : '已复制，历史仅在本次会话中保留'); }
@@ -291,11 +295,11 @@
       if (!event.repeat) openShelf();
       return;
     }
-    if (!state.editing && !isTool(state.area) && !document.querySelector('dialog[open]') && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='k') {
+    if (!state.editing && hasLibrarySearch(state.area) && !document.querySelector('dialog[open]') && (event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='k') {
       event.preventDefault(); const field=document.querySelector('#search'); field.focus(); field.select();
     }
   });
-  window.addEventListener('storage',()=>{ if (!state.editing && !isTool(state.area) && !closeShelf) { layout(); drawContent(); } });
+  window.addEventListener('storage',()=>{ if (!state.editing && hasLibrarySearch(state.area) && !closeShelf) { layout(); drawContent(); } });
   function openLocation() {
     const area = location.hash.slice(1);
     navigate(Object.hasOwn(areaNames, area) ? area : 'builtin');

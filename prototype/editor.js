@@ -34,7 +34,7 @@ function highlightDraft(runs, diff, escape, locateDeletions = false) {
   return html.join('');
 }
 
-function openPromptEditor({host, record, origin, store, onCancel, onFinish, notify, copy, icon, escape}) {
+function openPromptEditor({host, record, origin, store, onCancel, onFinish, notify, copy, icon, escape, backLabel = '返回列表'}) {
   const model = window.PromptModel;
   const original = (record.body || '').replace(/\r\n?/g, '\n');
   const originalOutput = model.render(original);
@@ -49,13 +49,14 @@ function openPromptEditor({host, record, origin, store, onCancel, onFinish, noti
     : safe(source.name)}</div>` : '';
   host.innerHTML = `
     <article class="pe">
-      <button class="pe-back" type="button" data-ed="back">${icon('back', 16)}返回列表</button>
+      <button class="pe-back" type="button" data-ed="back">${icon('back', 16)}${safe(backLabel)}</button>
       <header class="pe-head">
         <span class="pe-location">${origin === 'new' ? '我的模板' : `${libraryName} / ${safe(record.category || '未分类')}`}</span>
         <h1>${safe(title)}</h1>
         <p>${safe(record.description || '直接改写正文，用【例：示例】标出可替换的内容。')}</p>
       </header>
       <div class="pe-columns">
+        <div class="pe-main">
         <section class="pe-input-card" aria-labelledby="pe-source-title">
           <div class="pe-card-head">
             <h2 id="pe-source-title"><label for="pe-raw">${icon('edit',17)}编辑原文</label></h2>
@@ -78,6 +79,13 @@ function openPromptEditor({host, record, origin, store, onCancel, onFinish, noti
           <div class="pe-preview-foot">${icon('copy',14)}使用时复制此处的纯文本。</div>
           ${sourceLabel}
         </section>
+        </div>
+        <aside class="pe-reuse" aria-labelledby="pe-reuse-title">
+          <div class="pe-card-head"><h2 id="pe-reuse-title">${icon('library',17)}拼接模板</h2></div>
+          <p class="pe-reuse-hint">拖到原文中的目标位置，或点击插入光标处。</p>
+          <label class="pe-reuse-search">${icon('search',15)}<input type="search" placeholder="搜索其他模板" aria-label="搜索其他模板" autocomplete="off"></label>
+          <div class="pe-reuse-list"></div>
+        </aside>
       </div>
       <footer class="pe-footer">
         <button class="btn" type="button" data-ed="cancel">取消</button>
@@ -153,6 +161,57 @@ function openPromptEditor({host, record, origin, store, onCancel, onFinish, noti
   sourceInput.addEventListener('input', refreshDraft);
   sourceInput.addEventListener('scroll', syncScroll);
   changes.addEventListener('toggle', renderComparison);
+  const reuse = editor.querySelector('.pe-reuse-list');
+  const search = editor.querySelector('.pe-reuse-search input');
+  const libraries = [
+    {name:'我的模板', origin:'personal', items:store.listPersonal()},
+    {name:'附加库', origin:'builtin', items:window.PROMPT_LIBRARY}
+  ];
+  const snippets = new WeakMap();
+  function drawSnippets() {
+    const query = search.value.trim().toLocaleLowerCase();
+    const fragment = document.createDocumentFragment();
+    for (const library of libraries) {
+      const items = library.items.filter(item =>
+        !(origin === library.origin && item.id === record.id) &&
+        [item.title,item.category,item.body].some(text => String(text || '').toLocaleLowerCase().includes(query)));
+      if (!items.length) continue;
+      const heading = document.createElement('h3');
+      heading.textContent = library.name;
+      fragment.append(heading);
+      for (const item of items) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.draggable = true;
+        button.className = 'pe-snippet';
+        button.title = '插入「' + item.title + '」';
+        button.innerHTML = '<span>' + safe(item.title) + '</span><small>' + safe(item.category) + '</small>';
+        snippets.set(button,item);
+        fragment.append(button);
+      }
+    }
+    if (!fragment.childNodes.length) fragment.append('没有匹配的模板。');
+    reuse.replaceChildren(fragment);
+  }
+  search.addEventListener('input',drawSnippets);
+  reuse.addEventListener('dragstart',event => {
+    const item = snippets.get(event.target.closest('.pe-snippet'));
+    if (!item || !event.dataTransfer) return;
+    // Native plain-text drops use the pointer's text offset, including on wrapped or scrolled lines.
+    event.dataTransfer.clearData();
+    event.dataTransfer.setData('text/plain',item.body);
+    event.dataTransfer.effectAllowed = 'copy';
+  });
+  reuse.addEventListener('click',event => {
+    const item = snippets.get(event.target.closest('.pe-snippet'));
+    if (!item) return;
+    sourceInput.focus({preventScroll:true});
+    if (!document.execCommand('insertText',false,item.body)) {
+      sourceInput.setRangeText(item.body,sourceInput.selectionStart,sourceInput.selectionEnd,'end');
+      sourceInput.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+  });
+  drawSnippets();
 
   function openSave() {
     const dialog = document.querySelector('#save-dialog');

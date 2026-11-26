@@ -36,7 +36,7 @@ if [ -z "$obj" ]; then obj=$("$repo/desktop/scripts/build-core.sh" windows-x64);
 cd "$src"
 x86_64-w64-mingw32-windres --codepage=65001 app.rc -O coff -o "$work/app.o"
 x86_64-w64-mingw32-g++ -std=c++17 -Os -static -s -municode -mwindows -I"$tools_dir" -I"$sdk/include" \
-  host.cpp "$obj" "$work/app.o" -o "$stage/CiXia.exe" -ldwmapi -lgdiplus -lgdi32 -lole32 -lshell32 -lcomdlg32 -lcomctl32 -lcrypt32 -luuid -luser32
+  host.cpp "$obj" "$work/app.o" -o "$stage/CiXia.exe" -ldwmapi -lgdiplus -lgdi32 -lole32 -lshell32 -lcomdlg32 -lcomctl32 -lcrypt32 -lwinhttp -luuid -luser32
 cp "$sdk/x64/WebView2Loader.dll" "$stage/"
 cp "$work/webview2/LICENSE.txt" "$stage/licenses/WebView2-LICENSE.txt"
 cp "$work/webview2/NOTICE.txt" "$stage/licenses/WebView2-NOTICE.txt"
@@ -45,7 +45,7 @@ cp "$repo/index.html" "$stage/www/"
 cp -R "$repo/prototype" "$stage/www/"
 cp -R "$repo/desktop/ui" "$stage/www/desktop/"
 find "$stage" -name .DS_Store -delete
-makensis -V2 "-DOUTPUT=$out/CiXia-1.2.0-Windows-x64-Setup.exe" "-DICONFILE=$src/CiXia.ico" \
+makensis -V2 "-DOUTPUT=$out/CiXia-1.3.0-Windows-x64-Setup.exe" "-DICONFILE=$src/CiXia.ico" \
   "-DBOOTSTRAP=$tools_dir/MicrosoftEdgeWebview2Setup.exe" "-DSTAGE=$stage" "$src/installer.nsi"
 if [ -n "${PS_WINDOWS_STAGE:-}" ]; then mkdir -p "$PS_WINDOWS_STAGE"; cp -R "$stage/." "$PS_WINDOWS_STAGE/"; fi
-echo "$out/CiXia-1.2.0-Windows-x64-Setup.exe"
+echo "$out/CiXia-1.3.0-Windows-x64-Setup.exe"

@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import ScreenCaptureKit
 
 @_silgen_name("ps_scroll_match")
@@ -123,10 +124,14 @@ private struct CapturedPixels {
   }
 }
 
+enum CaptureDestination {
+  case edit, copy, save, pin
+}
+
 @MainActor final class NativeCaptureSession: NSObject {
   private(set) var isLong: Bool
   var onStatus: ((String) -> Void)?
-  var onFinish: ((CGImage?) -> Void)?
+  var onFinish: ((CGImage?, CaptureDestination) -> Void)?
   var hasFrames: Bool { firstImage != nil }
   private(set) var frameHeight = 0
   private var automatic: Bool
@@ -139,11 +144,14 @@ private struct CapturedPixels {
   private var border: NSPanel?
   private var frozenPreview: NSImageView?
   private var firstImage: CGImage?
-  private var pendingFinish = false
+  private var pendingFinish: CaptureDestination?
   private var missedOverlap = false
   private var canScroll = false
   private var autoButton: NSButton?
   private var finishButton: NSButton?
+  private var quickButtons: [NSButton] = []
+  private var escapeHandler: EventHandlerRef?
+  private var escapeKey: EventHotKeyRef?
   private var task: Task<Void, Never>?
   private var filter: SCContentFilter?
   private var configuration: SCStreamConfiguration?
@@ -166,6 +174,7 @@ private struct CapturedPixels {
       fail("需要屏幕录制权限。请在「系统设置 → 隐私与安全性 → 屏幕与系统录音」中允许词匣，必要时退出并重新打开。")
       return
     }
+    registerEscape()
     let mouse = NSEvent.mouseLocation
     for screen in NSScreen.screens {
       let p = SelectionPanel(
@@ -193,6 +202,34 @@ private struct CapturedPixels {
       }
     }
     if overlays.isEmpty { fail("没有可用的显示器。") }
+  }
+  // Register only Escape, and only for the lifetime of this capture. The source
+  // application keeps keyboard focus and can still receive scrolling gestures.
+  private func registerEscape() {
+    let target = GetApplicationEventTarget()
+    var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    let signature: OSType = 0x5053_4553  // PSES
+    guard InstallEventHandler(target, { _, event, context in
+      guard let event, let context else { return OSStatus(eventNotHandledErr) }
+      var key = EventHotKeyID()
+      guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+        nil, MemoryLayout<EventHotKeyID>.size, nil, &key) == noErr,
+        key.signature == 0x5053_4553, key.id == 1
+      else { return OSStatus(eventNotHandledErr) }
+      let session = Unmanaged<NativeCaptureSession>.fromOpaque(context).takeUnretainedValue()
+      DispatchQueue.main.async { [weak session] in session?.cancel() }
+      return noErr
+    }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &escapeHandler) == noErr else { return }
+    if RegisterEventHotKey(UInt32(kVK_Escape), 0, EventHotKeyID(signature: signature, id: 1),
+      target, UInt32(kEventHotKeyExclusive), &escapeKey) != noErr {
+      releaseEscape()
+    }
+  }
+  private func releaseEscape() {
+    if let escapeKey { UnregisterEventHotKey(escapeKey) }
+    if let escapeHandler { RemoveEventHandler(escapeHandler) }
+    escapeKey = nil
+    escapeHandler = nil
   }
   private func removeOverlays() {
     for p in overlays {
@@ -288,13 +325,35 @@ private struct CapturedPixels {
   }
   private func showToolbar(screen: NSScreen, selection: CGRect) {
     let visible = screen.visibleFrame
-    let width = min(490, visible.width - 10)
-    let h: CGFloat = 72
+    let mode = NSButton(title: "返回普通截图", target: self, action: #selector(changeMode))
+    let auto = NSButton(title: "切换手动滚动", target: self, action: #selector(toggleAuto))
+    let finish = NSButton(title: "完成并编辑", target: self, action: #selector(finish))
+    let quit = NSButton(title: "取消", target: self, action: #selector(cancel))
+    quit.keyEquivalent = "\u{1b}"
+    quit.keyEquivalentModifierMask = []
+    let copy = NSButton(title: "复制", target: self, action: #selector(copyCapture))
+    let save = NSButton(title: "保存", target: self, action: #selector(saveCapture))
+    let pin = NSButton(title: "置顶", target: self, action: #selector(pinCapture))
+    modeButton = mode
+    autoButton = auto
+    finishButton = finish
+    quickButtons = [copy, save, pin]
+    let controls = [finish, mode, auto, quit] + quickButtons
+    for button in controls {
+      button.bezelStyle = .rounded
+      button.controlSize = .regular
+    }
+    let spacing: CGFloat = 4
+    let desiredWidth = controls.reduce(CGFloat(20)) { $0 + $1.intrinsicContentSize.width }
+      + CGFloat(controls.count - 1) * spacing
+    let width = min(visible.width - 12, max(420, desiredWidth))
+    let rows = desiredWidth > width ? [[finish, mode, auto, quit], quickButtons] : [controls]
+    let h: CGFloat = rows.count == 1 ? 66 : 94
     var origin = NSPoint(
       x: min(visible.maxX - width - 6, max(visible.minX + 6, selection.midX - width / 2)),
       y: selection.minY - h - 6)
     if origin.y < visible.minY + 5 { origin.y = min(visible.maxY - h - 6, selection.maxY + 6) }
-    let panel = NSPanel(
+    let panel = SelectionPanel(
       contentRect: NSRect(origin: origin, size: NSSize(width: width, height: h)),
       styleMask: [.borderless, .nonactivatingPanel],
       backing: .buffered, defer: false)
@@ -311,50 +370,43 @@ private struct CapturedPixels {
     view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
     view.layer?.cornerRadius = 9
     let label = NSTextField(labelWithString: "准备截取首帧…")
-    label.frame = NSRect(x: 12, y: 44, width: width - 24, height: 20)
+    label.frame = NSRect(x: 12, y: h - 29, width: width - 24, height: 20)
     label.font = .systemFont(ofSize: 12, weight: .medium)
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
     statusField = label
-    let mode = NSButton(title: "滚动长截图", target: self, action: #selector(changeMode))
-    let auto = NSButton(title: "自动滚动", target: self, action: #selector(toggleAuto))
-    let finish = NSButton(title: "编辑截图", target: self, action: #selector(finish))
-    let quit = NSButton(title: "取消", target: self, action: #selector(cancel))
-    modeButton = mode
-    autoButton = auto
-    finishButton = finish
-    for b in [mode, auto, finish, quit] {
-      b.bezelStyle = .rounded
-      b.controlSize = .regular
+    for (i, row) in rows.enumerated() {
+      let stack = NSStackView(views: row)
+      stack.spacing = spacing
+      stack.alignment = .centerY
+      stack.translatesAutoresizingMaskIntoConstraints = false
+      view.addSubview(stack)
+      NSLayoutConstraint.activate([
+        stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+        stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -6 - CGFloat(rows.count - 1 - i) * 28),
+      ])
     }
-    let stack = NSStackView(views: [finish, mode, auto, quit])
-    stack.spacing = 7
-    stack.alignment = .centerY
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(stack)
-    NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-      stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -7),
-    ])
     panel.contentView = view
     toolbar = panel
     panel.orderFrontRegardless()
+    if escapeKey == nil { panel.makeKey() }
     setStatus("准备截取首帧…")
   }
   private func setStatus(_ text: String) {
     statusField?.stringValue = text
     statusField?.toolTip = text
     modeButton?.title = isLong ? "返回普通截图" : "滚动长截图"
-    modeButton?.isEnabled = hasFrames && (isLong || canScroll)
+    modeButton?.isEnabled = hasFrames && pendingFinish == nil && (isLong || canScroll)
     autoButton?.isHidden = !isLong
-    autoButton?.isEnabled = hasFrames
+    autoButton?.isEnabled = hasFrames && pendingFinish == nil
     autoButton?.title = automatic ? "切换手动滚动" : "自动滚动"
     finishButton?.title = isLong ? "完成并编辑" : "编辑截图"
-    finishButton?.isEnabled = hasFrames
+    finishButton?.isEnabled = hasFrames && pendingFinish == nil
+    for button in quickButtons { button.isEnabled = hasFrames && pendingFinish == nil }
   }
   private func takeFrame() {
     guard !done, !working, let filter, let configuration else { return }
-    let requestedAfterFinishClick = pendingFinish
+    let requestedAfterFinishClick = pendingFinish != nil
     working = true
     task = Task { [weak self] in
       guard let self else { return }
@@ -374,18 +426,18 @@ private struct CapturedPixels {
         }
         // A capture that was already in flight when Finish was clicked can show
         // the page before the last wheel step. Include a fresh sample as well.
-        let needsFinalSample = pendingFinish && !requestedAfterFinishClick
-        if needsFinalSample { pendingFinish = false }
+        let finalAction = requestedAfterFinishClick ? nil : pendingFinish
+        if finalAction != nil { pendingFinish = nil }
         try ingest(CapturedPixels(image))
-        if needsFinalSample && !done {
+        if let finalAction, !done {
           scheduled?.cancel()
-          pendingFinish = true
+          pendingFinish = finalAction
           takeFrame()
         }
       } catch {
         guard !done else { return }
         working = false
-        pendingFinish = false
+        pendingFinish = nil
         if hasFrames {
           automatic = false
           missedOverlap = true
@@ -400,7 +452,7 @@ private struct CapturedPixels {
   @objc private func changeMode() {
     guard let firstImage, !done else { return }
     scheduled?.cancel()
-    pendingFinish = false
+    pendingFinish = nil
     automatic = false
     unchanged = 0
     missedOverlap = false
@@ -429,12 +481,12 @@ private struct CapturedPixels {
         unchanged += 1
         if missedOverlap { setStatus("已回到上一帧，可继续向下滚动 · \(totalRows) px") }
         missedOverlap = false
-        if pendingFinish || (automatic && unchanged >= 3) {
+        if pendingFinish != nil || (automatic && unchanged >= 3) {
           if frames > 1 {
             finishImage()
             return
           }
-          pendingFinish = false
+          pendingFinish = nil
           automatic = false
           setStatus("仅采到首屏。请在框内向下滚动，或返回普通截图。")
         }
@@ -443,7 +495,7 @@ private struct CapturedPixels {
       }
       guard overlap > 0, overlap < next.height else {
         automatic = false
-        pendingFinish = false
+        pendingFinish = nil
         missedOverlap = true
         setStatus("这段未拼入。向上回滚至上一屏附近，再缓慢向下滚动。")
         scheduleNext()
@@ -452,11 +504,11 @@ private struct CapturedPixels {
       let extra = next.height - overlap
       guard totalRows + extra <= min(32000, 32_000_000 / next.width) else {
         automatic = false
-        pendingFinish = false
         if frames > 1 {
-          onStatus?("已达长图尺寸上限，本次编辑已成功拼接的部分。")
+          onStatus?("已达长图尺寸上限，使用已成功拼接的部分。")
           finishImage()
         } else {
+          pendingFinish = nil
           setStatus("已达尺寸上限。请缩小选区，或返回普通截图。")
           scheduleNext()
         }
@@ -478,12 +530,12 @@ private struct CapturedPixels {
     unchanged = 0
     let gesture = automatic ? "自动滚动中" : "请在框内向下滚动，正在自动采集"
     setStatus("\(gesture) · 已拼 \(frames) 帧 / \(totalRows) px")
-    if pendingFinish {
-      pendingFinish = false
+    if pendingFinish != nil {
       if frames > 1 {
         finishImage()
         return
       }
+      pendingFinish = nil
       setStatus("仅采到首屏。请在框内向下滚动，或返回普通截图。")
     }
     scheduleNext()
@@ -592,15 +644,20 @@ private struct CapturedPixels {
       scheduleNext()
     }
   }
-  @objc func finish() {
-    guard !done, let firstImage else { return }
+  @objc func finish() { complete(.edit) }
+  @objc private func copyCapture() { complete(.copy) }
+  @objc private func saveCapture() { complete(.save) }
+  @objc private func pinCapture() { complete(.pin) }
+  private func complete(_ destination: CaptureDestination) {
+    guard !done, pendingFinish == nil, let firstImage else { return }
     if !isLong {
-      end(with: firstImage)
+      end(with: firstImage, destination: destination)
       return
     }
     scheduled?.cancel()
     automatic = false
-    pendingFinish = true
+    pendingFinish = destination
+    setStatus("正在拼接最后一帧…")
     // Include a change immediately before the user pressed Finish.
     if !working { takeFrame() }
   }
@@ -611,16 +668,17 @@ private struct CapturedPixels {
       fail("无法生成长图。")
       return
     }
-    end(with: image)
+    end(with: image, destination: pendingFinish ?? .edit)
   }
   @objc func cancel() { end(with: nil) }
   private func fail(_ reason: String) {
     onStatus?(reason)
     end(with: nil)
   }
-  private func end(with image: CGImage?) {
+  private func end(with image: CGImage?, destination: CaptureDestination = .edit) {
     guard !done else { return }
     done = true
+    releaseEscape()
     scheduled?.cancel()
     task?.cancel()
     removeOverlays()
@@ -643,6 +701,6 @@ private struct CapturedPixels {
     combined = Data()
     let completed = onFinish
     onFinish = nil
-    completed?(image)
+    completed?(image, destination)
   }
 }

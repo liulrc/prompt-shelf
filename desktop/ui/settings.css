@@ -15,3 +15,17 @@
 .ds-key select {min-height:32px;max-width:48%;font-size:12px;padding:4px 6px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:5px;}
 .ds-actions {display:flex;justify-content:space-between;gap:8px;}
 #message {min-height:1.65em;margin-top:8px;}
+.ds-field {display:block;font-size:13px;font-weight:600;margin:12px 0 5px;}
+#ai-settings input[type=url],#ai-settings input[type=password],#ai-model-query {width:100%;min-width:0;padding:8px 9px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:13px;}
+.ds-check,#ai-model-list label {display:flex;align-items:center;gap:7px;font-size:12px;cursor:pointer;}
+.ds-check {margin-top:6px;}
+.ds-check[hidden],#ai-model-list[hidden] {display:none;}
+.ds-model-header,.ds-model-search,.ds-ai-actions {display:flex;align-items:center;gap:8px;}
+.ds-model-header {margin:17px 0 8px;justify-content:space-between;}
+#ai-model-list {border:1px solid var(--line);border-radius:6px;margin-top:7px;padding:5px 9px;max-height:145px;overflow-y:auto;overscroll-behavior:contain;}
+#ai-model-list label {padding:5px 0;overflow-wrap:anywhere;}
+#ai-settings input[type=checkbox] {accent-color:var(--ink);flex-shrink:0;}
+#ai-model-count {margin:5px 0;}
+.ds-ai-actions {justify-content:flex-end;}
+#ai-feedback {min-height:1.5em;margin-top:5px;}
+#ai-settings {border-bottom:1px solid var(--line);}

@@ -1,15 +1,25 @@
 # 词匣 · Prompt Shelf
 
-词匣是 macOS 和 Windows 上的本地桌面工具。把反复使用的 AI 提示词存为模板，改几个字就能复制到正在使用的 AI 工具。它也能找回之前复制的内容、截取滚动页面，并把参考图置顶在其他窗口旁。日常使用无需账号或模型 API 密钥。
+词匣是 macOS 和 Windows 上的本地桌面工具。把反复使用的 AI 提示词存为模板，改几个字就能复制到正在使用的 AI 工具。它也能找回之前复制的内容、截取滚动页面，并把参考图置顶在其他窗口旁。模板、剪贴板和截图可离线使用。需要 AI 帮你改写提示词时，可连接自己的模型服务。
 
 ## 下载安装
 
-| 平台 | 1.2.0 安装包 | 安装方式 |
+| 平台 | 1.3.0 安装包 | 安装方式 |
 | --- | --- | --- |
-| macOS 14 及以上，Apple Silicon / Intel | [下载通用 DMG · 733 KiB](https://github.com/liulrc/prompt-shelf/releases/download/v1.2.0/PromptShelf-1.2.0-macOS-universal.dmg) | 打开 DMG，把「词匣」拖入「应用程序」，从那里启动。 |
-| Windows 10 1809 及以上或 Windows 11，x64 | [下载 Setup.exe · 2.37 MiB](https://github.com/liulrc/prompt-shelf/releases/download/v1.2.0/CiXia-1.2.0-Windows-x64-Setup.exe) | 运行安装程序。缺少 WebView2 时，安装器会联网补装。 |
+| macOS 14 及以上，Apple Silicon / Intel | [下载通用 DMG](https://github.com/liulrc/prompt-shelf/releases/download/v1.3.0/PromptShelf-1.3.0-macOS-universal.dmg) | 打开 DMG，把「词匣」拖入「应用程序」，从那里启动。 |
+| Windows 10 1809 及以上或 Windows 11，x64 | [下载 Setup.exe](https://github.com/liulrc/prompt-shelf/releases/download/v1.3.0/CiXia-1.3.0-Windows-x64-Setup.exe) | 运行安装程序。缺少 WebView2 时，安装器会联网补装。 |
 
-升级前请先退出正在运行的词匣。Mac 首次截图需要允许屏幕录制，自动滚动还需允许辅助功能。当前 macOS 包使用临时签名，Windows 包尚无发布者签名。[版本说明与 SHA-256](https://github.com/liulrc/prompt-shelf/releases/tag/v1.2.0) · [安装及 Mac 升级权限说明](docs/桌面版使用说明.md)
+升级前请先退出正在运行的词匣。Mac 首次截图需要允许屏幕录制，自动滚动还需允许辅助功能。当前 macOS 包使用临时签名，Windows 包尚无发布者签名。[版本说明与 SHA-256](https://github.com/liulrc/prompt-shelf/releases/tag/v1.3.0) · [安装及 Mac 升级权限说明](docs/桌面版使用说明.md)
+
+## AI 优化与模板拼接
+
+在「设置 → AI 模型接口」填写兼容 OpenAI 的接口地址和 API 密钥。拉取模型列表后，勾选一个或多个模型并保存。服务未提供模型列表时，可以手动添加模型名。本机免鉴权服务可留空密钥。
+
+在模板空间顶部打开「AI 优化提示词」，输入草稿，选择模型后点「一键优化」。默认生成中文提示词，英文输入也一样。原任务要求写英文邮件时，中文提示词会保留“邮件使用英文”的要求。每个模型的结果单独展示，可复制或转入编辑器。优化时，草稿会发送到你配置的服务。
+
+在提示词编辑器右侧，可搜索「我的模板」和「附加库」。把模板拖到正文里要插入的位置，即可拼接多段提示词，示例标记和改写高亮仍然可用。
+
+![从右侧模板插入一段原文，绿色高亮显示刚加入的段落](docs/模板拼接预览.png)
 
 ## 用一次模板
 
@@ -27,10 +37,12 @@
 | --- | --- | --- | --- |
 | 我的模板 | Option + X | Alt + X | 打开个人库。写到一半也可以收起，再打开继续改。 |
 | 剪贴板历史 | Option + Q | Alt + Q | 搜索复制过的文字、图片和视频文件。选中卡片并回车，回到原窗口即可粘贴。 |
-| 截图与长截图 | Option + A | Alt + A | 拖出选区，截取一张图，或切到「滚动长截图」。在独立编辑窗中画框、划线、加文字或涂马赛克。 |
+| 截图与长截图 | Option + A | Alt + A | 拖出选区后可直接复制、保存、置顶，也可切到「滚动长截图」。按 Esc 取消。在独立编辑窗中画框、划线、加文字或涂马赛克。 |
 | 近期截图库 | Option + Z | Alt + Z | 一次选择多张截图置顶。每张图都能独立移动、等比缩放和关闭。 |
 
 四组快捷键均可在「设置」中修改。再按同一组合可收起对应窗口。框选或滚动中再按截图键会取消本次截取，进入截图编辑窗后再按则最小化并保留标注。
+
+在 Mac 上关闭工作台、设置和编辑窗口后，词匣会在后台继续运行并从 Dock 隐藏。用菜单栏或快捷键可再次唤出，按 ⌘Q 或选择「退出词匣」可结束程序。
 
 ## 数据与实现
 

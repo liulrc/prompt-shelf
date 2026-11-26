@@ -6,14 +6,15 @@ extension DesktopApp {
   func runSmoke() {
     Task { @MainActor in
       do {
-        func waitFor(_ predicate: () -> Bool) async throws {
+        func waitFor(_ predicate: () -> Bool, line: Int = #line) async throws {
           for _ in 0..<160 {
             if predicate() { return }
             try await Task.sleep(nanoseconds: 100_000_000)
           }
-          throw AppIssue("窗口加载超时")
+          throw AppIssue("等待桌面操作超时（测试第 \(line) 行）")
         }
         try await waitFor { self.ready.contains("main") }
+        guard NSApp.activationPolicy() == .regular else { throw AppIssue("工作台未进入前台应用模式") }
         guard let v = views["main"] else { throw AppIssue("主窗口缺失") }
         func js(_ view: WKWebView, _ script: String) async throws -> Any? {
           try await view.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
@@ -87,7 +88,7 @@ extension DesktopApp {
         native.onCapture?([
           "type": "image", "mime": "image/png", "data": fixture, "title": "截图测试", "frameHeight": 50,
           "source": "截图工具",
-        ])
+        ], .edit)
         guard let picID = try archive.captures().first?["id"] as? String else {
           throw AppIssue("截图未能写入历史")
         }
@@ -194,7 +195,7 @@ extension DesktopApp {
         native.onCapture?([
           "type": "image", "mime": "image/png", "data": tall, "title": "整张长图", "height": 2980,
           "width": 310, "frameHeight": 552, "source": "截图工具",
-        ])
+        ], .edit)
         try await waitFor { self.ready.contains(where: { $0.hasPrefix("editor-") }) }
         let tallKey = ready.first(where: { $0.hasPrefix("editor-") })!
         let whole = try await js(
@@ -251,6 +252,9 @@ extension DesktopApp {
         showWeb("settings")
         try await waitFor { self.ready.contains("settings") }
         guard let sets = views["settings"] else { throw AppIssue("设置窗口缺失") }
+        if let port = ProcessInfo.processInfo.environment["PS_SMOKE_AI_PORT"].flatMap(UInt16.init) {
+          try await checkProviderBridge(port: port, main: v, settingsView: sets)
+        }
         let controls = try await js(
           sets, "return document.querySelectorAll('#hotkeys select').length")
         guard controls as? Int == 8 else { throw AppIssue("设置页快捷键控件不完整") }
@@ -322,16 +326,62 @@ extension DesktopApp {
         windows["settings"]?.close()
         windows["main"]?.close()
         guard views.isEmpty else { throw AppIssue("关窗后未释放 WebView") }
+        try await waitFor { NSApp.activationPolicy() == .accessory }
+        board.clearContents()
+        board.setString("词匣后台监听验收", forType: .string)
+        try await waitFor { (try? self.archive.list().first?["text"] as? String) == "词匣后台监听验收" }
+        handleShortcut("shelf")
+        guard shelf?.isVisible == true, NSApp.activationPolicy() == .accessory else {
+          throw AppIssue("后台卡片弹窗改变了 Dock 状态")
+        }
+        handleShortcut("shelf")
         performAction("pin")
         try await waitFor { self.ready.contains("gallery") }
         guard views.count == 1, views["main"] == nil else { throw AppIssue("从后台唤出图库时打开了工作台") }
         windows["gallery"]?.close()
         showMain("personal")
+        guard NSApp.activationPolicy() == .regular else { throw AppIssue("重新打开工作台未恢复 Dock") }
         try await waitFor { self.ready.contains("main") }
         let count = try await js(
           views["main"]!,
           "return PromptModel.createStore().listPersonal().filter(x=>x.title==='回读模板').length")
         guard count as? Int == 1 else { throw AppIssue("重新打开后模板丢失") }
+        let fileName = "直接截图测试-" + UUID().uuidString + ".png"
+        let quick: Object = ["type": "image", "mime": "image/png", "data": fixture,
+          "title": "直接截图测试", "filename": fileName, "frameHeight": 75, "source": "截图工具"]
+        native.onCapture?(quick, .copy)
+        guard let copiedImage = board.data(forType: .png), NSBitmapImageRep(data: copiedImage)?.pixelsWide == 112,
+          let quickID = try archive.captures().first?["id"] as? String, latestCaptureEditor == nil
+        else { throw AppIssue("直接复制截图未归档、写剪贴板，或意外打开编辑器") }
+        let boardVersion = board.changeCount
+        native.onCapture?(quick, .pin)
+        guard native.pinnedWindows[quickID]?.isVisible == true, board.changeCount == boardVersion
+        else { throw AppIssue("直接置顶截图失败或意外改写剪贴板") }
+        native.unpin()
+        if CGPreflightPostEventAccess() {
+          print("PASS direct copy and pin. Checking system save panel")
+          native.onCapture?(quick, .save)
+          let destination = archive.root.appendingPathComponent(fileName).standardizedFileURL
+          let readyToSave = {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+              && (NSApp.keyWindow as? NSSavePanel)?.url?.standardizedFileURL == destination
+          }
+          try await waitFor(readyToSave)
+          print("PASS isolated Save window opened")
+          // The system save dialog runs its controls in a separate process. Send
+          // the normal Return only while our own dialog and temporary path are active.
+          try await Task.sleep(nanoseconds: 750_000_000)
+          guard readyToSave() else { throw AppIssue("保存测试窗口焦点已变化") }
+          for down in [true, false] {
+            CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: down)?.post(tap: .cghidEventTap)
+          }
+          try await waitFor { FileManager.default.fileExists(atPath: destination.path) }
+          guard try Data(contentsOf: destination) == Data(base64Encoded: fixture),
+            board.changeCount == boardVersion, latestCaptureEditor == nil
+          else { throw AppIssue("直接保存的 PNG 与原选区不符，或意外改写剪贴板") }
+          print("PASS native Save dialog wrote the original PNG")
+        }
+        print("PASS quick capture copy and pin, clipboard history and editor-free output")
         print(
           "PASS standalone screenshot editor, Chinese annotation exported to system PNG, multi-selection screenshot gallery, independently resizable pins, clipboard monitoring, shortcuts, settings, shelf and template recovery"
         )
@@ -352,3 +402,44 @@ let isolatedTestKeys = [
   "templates": "Ctrl+Alt+Shift+4",
 ]
 let smokePasteboardToken = UUID().uuidString
+
+extension DesktopApp {
+  private func checkProviderBridge(port: UInt16, main: WKWebView, settingsView: WKWebView) async throws {
+    let args = ["server": "http://127.0.0.1:\(port)"]
+    let configured = try await settingsView.callAsyncJavaScript("""
+      const bridge=window.PromptDesktop;
+      const baseURL=server+'/team/v1', apiKey='fixture-only';
+      const saved=await bridge.request('ai.settings.set',{baseURL,apiKey,models:['fixture-a','fixture-b']});
+      if(!saved.hasKey || saved.apiKey!==undefined) return false;
+      const ids=await bridge.request('ai.models.list',{baseURL:baseURL+'/chat/completions'});
+      const other=await bridge.request('ai.models.list',{baseURL:server+'/other/v1'});
+      let redirected=false;
+      try { await bridge.request('ai.models.list',{baseURL:server+'/redirect/v1',apiKey}); }
+      catch(e) { redirected=e.message.includes('302'); }
+      return ids.models.join(',')==='fixture-a,fixture-b' && other.models[0]==='local' && redirected;
+      """, arguments: args, in: nil, contentWorld: .page)
+    guard configured as? Bool == true else { throw AppIssue("模型列表、密钥隔离或重定向验证失败") }
+    let optimized = try await main.callAsyncJavaScript("""
+      document.querySelector('[data-nav=optimize]').click();
+      const pause=()=>new Promise(r=>setTimeout(r,50));
+      for(let i=0;i<100&&document.querySelectorAll('.ai-choices input:checked').length!==2;i++)await pause();
+      const field=document.querySelector('#ai-input');field.value='Summarize the project notes in an English email.';field.dispatchEvent(new Event('input'));
+      for(let i=0;i<100&&document.querySelector('#ai-submit').disabled;i++)await pause();
+      document.querySelector('#ai-submit').click();
+      for(let i=0;i<120;i++){
+        const rows=Array.from(document.querySelectorAll('.ai-result'));
+        if(rows.length===2 && rows[0].textContent.includes('根据项目记录撰写一封英文邮件，概括进展和下一步。') && rows[1].textContent.includes('429'))return true;
+        await pause();
+      }
+      return '模型控件 ' + document.querySelector('#ai-target')?.textContent + '，结果 ' + document.querySelector('.ai-result-list')?.textContent;
+      """, arguments: [:], in: nil, contentWorld: .page)
+    let raw = try String(contentsOf: archive.root.appendingPathComponent("AISettings.json"), encoding: .utf8)
+    let cleared = try await settingsView.callAsyncJavaScript("""
+      const r=await PromptDesktop.request('ai.settings.set',{baseURL:'',models:[]});
+      return !r.hasKey && !r.models.length;
+      """, arguments: [:], in: nil, contentWorld: .page)
+    guard optimized as? Bool == true else { throw AppIssue("优化结果检查失败 " + (optimized as? String ?? "")) }
+    guard cleared as? Bool == true, !raw.contains("fixture-only") else { throw AppIssue("密钥清理或存储检查失败") }
+    print("PASS provider Keychain round trip, endpoint isolation, redirect refusal and one-click per-model output")
+  }
+}

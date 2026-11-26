@@ -75,7 +75,7 @@ private final class PinnedPanel: NSPanel {
 
 @MainActor final class NativeServices {
   var onClipboard: (([String: Any]) -> Void)?
-  var onCapture: (([String: Any]) -> Void)?
+  var onCapture: (([String: Any], CaptureDestination) -> Void)?
   var onCaptureEnded: ((Bool) -> Void)?
   var onHotkey: ((String) -> Void)?
   var onStatus: ((String) -> Void)?
@@ -311,7 +311,7 @@ private final class PinnedPanel: NSPanel {
     }
     let capture = NativeCaptureSession(isLong: long, automatic: automatic)
     capture.onStatus = { [weak self] in self?.onStatus?($0) }
-    capture.onFinish = { [weak self] bitmap in
+    capture.onFinish = { [weak self] bitmap, destination in
       guard let self else { return }
       let frameHeight = self.session?.frameHeight ?? bitmap?.height ?? 0
       let capturedLong = self.session?.isLong ?? long
@@ -333,7 +333,7 @@ private final class PinnedPanel: NSPanel {
         "filename": name + ".png",
         "mime": "image/png", "source": "截图工具", "width": bitmap.width, "height": bitmap.height,
         "frameHeight": frameHeight,
-      ])
+      ], destination)
       self.onCaptureEnded?(true)
     }
     session = capture

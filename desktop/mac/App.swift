@@ -9,6 +9,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
 {
   let archive: Archive
   let native: NativeServices
+  let promptAI: PromptAI
   let webRoot: URL
   var windows = [String: NSWindow](), views = [String: WKWebView]()
   var ready = Set<String>(), pendingArea: String?
@@ -28,6 +29,8 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     self.archive = archive
     self.webRoot = webRoot
     self.smoke = smoke
+    promptAI = PromptAI(root: archive.root, keychainService: smoke
+      ? "com.promptshelf.smoke." + UUID().uuidString : "com.promptshelf.desktop.ai")
     native = NativeServices(
       pasteboard: smoke
         ? NSPasteboard(name: .init("PromptShelf.Test." + smokePasteboardToken)) : .general)
@@ -44,6 +47,10 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   }
   func applicationDidFinishLaunching(_ notification: Notification) {
     buildMenus()
+    if !smoke {
+      DistributedNotificationCenter.default().addObserver(
+        self, selector: #selector(reopenWorkspace), name: Self.reopenNotification, object: nil)
+    }
     native.onClipboard = { [weak self] item in
       guard let self else { return }
       do { _ = try archive.add(item, trustedFileReference: true) } catch {
@@ -53,18 +60,8 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     native.onHotkey = { [weak self] action in self?.handleShortcut(action) }
     native.onStatus = { [weak self] text in self?.report(text) }
     native.onCaptureEnded = { [weak self] success in self?.restoreAfterCapture(success: success) }
-    native.onCapture = { [weak self] image in
-      guard let self else { return }
-      var item = image
-      do {
-        let saved = try archive.add(image, capture: true)
-        item["id"] = saved["id"]
-      } catch {
-        item["archiveError"] = error.localizedDescription
-        report("原图归档失败，可在编辑窗导出：" + error.localizedDescription)
-      }
-      do { try native.writeClipboard(image) } catch { report(error.localizedDescription) }
-      latestCaptureEditor = openImageEditor(item, returningTo: captureReturnApp)
+    native.onCapture = { [weak self] image, destination in
+      self?.completeCapture(image, destination: destination)
     }
     archive.onChange = { [weak self] in
       self?.shelf?.refresh()
@@ -114,13 +111,27 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   }
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
   {
-    if !flag {
-      if mainEditing { showWeb("main") } else { showMain("personal") }
-    }
+    if !flag || NSApp.activationPolicy() == .accessory { reopenWorkspace() }
     return true
+  }
+  static let reopenNotification = Notification.Name("com.promptshelf.desktop.showWorkspace")
+  @objc private func reopenWorkspace() {
+    if mainEditing { showWeb("main") } else { showMain("personal") }
+  }
+  private func usesDock(_ key: String) -> Bool {
+    key == "main" || key == "settings" || key.hasPrefix("editor-")
+  }
+  private func updateBackgroundPolicy() {
+    guard NSApp.activationPolicy() == .regular,
+      !windows.contains(where: { key, window in
+        usesDock(key) && (window.isVisible || window.isMiniaturized || hiddenForCapture.contains(key))
+      })
+    else { return }
+    NSApp.setActivationPolicy(.accessory)
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
   func applicationWillTerminate(_ notification: Notification) {
+    DistributedNotificationCenter.default().removeObserver(self)
     native.shutdown()
     NSWorkspace.shared.notificationCenter.removeObserver(self)
   }
@@ -278,8 +289,15 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     case "templates":
       let atTemplates = (pendingArea ?? mainArea) == "personal" || mainEditing
       if atTemplates, let main = visible("main") {
+        let previous = NSApp.isActive ? returnAfterClosing["main"] ?? lastExternal
+          : NSWorkspace.shared.frontmostApplication
+        returnAfterClosing.removeValue(forKey: "main")
+        if let previous, NSApp.isActive { NSApp.yieldActivation(to: previous) }
         main.orderOut(nil)
-        restoreShortcutFocus("main")
+        updateBackgroundPolicy()
+        if let previous, previous.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+          previous.activate(options: [])
+        }
       } else {
         if let front = NSWorkspace.shared.frontmostApplication,
           front.processIdentifier != ProcessInfo.processInfo.processIdentifier
@@ -318,6 +336,35 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       }
     }
     native.captureRegion(long: long, automatic: automatic)
+  }
+  private func completeCapture(_ image: Object, destination: CaptureDestination) {
+    var item = image
+    do {
+      let saved = try archive.add(image, capture: true)
+      item["id"] = saved["id"]
+    } catch {
+      item["archiveError"] = error.localizedDescription
+      report("原图归档失败：" + error.localizedDescription)
+    }
+    if destination == .edit || destination == .copy {
+      do { try native.writeClipboard(image) } catch { report(error.localizedDescription) }
+    }
+    switch destination {
+    case .edit:
+      latestCaptureEditor = openImageEditor(item, returningTo: captureReturnApp)
+    case .copy: break
+    case .pin:
+      do { try native.pin(item) } catch { report(error.localizedDescription) }
+    case .save:
+      let previous = captureReturnApp
+      saveFile(image, for: nil) { [weak self] result in
+        if case .failure(let error) = result { self?.report(error.localizedDescription) }
+        if let previous, !previous.isTerminated, NSApp.isActive, NSApp.keyWindow == nil {
+          NSApp.yieldActivation(to: previous)
+          previous.activate(options: [])
+        }
+      }
+    }
   }
   func restoreAfterCapture(success: Bool) {
     for name in hiddenForCapture { windows[name]?.orderBack(nil) }
@@ -395,6 +442,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   func showWeb(_ name: String) {
     let editor = name.hasPrefix("editor-")
     guard editor || ["main", "settings", "gallery"].contains(name) else { return }
+    if usesDock(name), NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
     if name == "gallery", let front = NSWorkspace.shared.frontmostApplication,
       front.processIdentifier != ProcessInfo.processInfo.processIdentifier
     {
@@ -488,6 +536,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     views[name]?.navigationDelegate = nil
     w.contentView = nil
     windows.removeValue(forKey: name)
+    if usesDock(name) {
+      DispatchQueue.main.async { [weak self] in self?.updateBackgroundPolicy() }
+    }
     views.removeValue(forKey: name)
     ready.remove(name)
     if latestCaptureEditor == name { latestCaptureEditor = nil }
@@ -587,6 +638,24 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         try mutateBackup(p)
         done(true)
       case "settings.get": done(settings())
+      case "ai.settings.get", "ai.settings.set", "ai.models.list", "ai.optimize":
+        let settingsWindow = v === views["settings"], mainWindow = v === views["main"]
+        let allowed = command == "ai.optimize" ? mainWindow
+          : command == "ai.settings.get" ? (settingsWindow || mainWindow) : settingsWindow
+        guard allowed else { throw AppIssue("请从模型设置或 AI 优化页执行此操作。") }
+        Task { @MainActor in
+          do {
+            switch command {
+            case "ai.settings.get": done(try await promptAI.settings())
+            case "ai.settings.set":
+              let config = try await promptAI.save(p)
+              done(config)
+              broadcast("ai.settings.changed", config)
+            case "ai.models.list": done(try await promptAI.models(p))
+            default: done(try await promptAI.optimize(p))
+            }
+          } catch { fail(error) }
+        }
       case "window.routeChanged":
         if v === views["main"], let area = p["area"] as? String, let editing = p["editing"] as? Bool
         {
@@ -695,33 +764,45 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         done(true)
         v.window?.close()
       case "file.save":
-        let filename = (p["filename"] as? String ?? "截图.png") as NSString
-        let picker = NSSavePanel()
-        picker.nameFieldStringValue = filename.lastPathComponent
-        picker.canCreateDirectories = true
         guard let w = v.window else { throw AppIssue("窗口已关闭。") }
-        picker.beginSheetModal(for: w) { [weak self] res in
-          guard res == .OK, let url = picker.url, let self else {
-            fail(AppIssue("已取消保存。"))
-            return
+        saveFile(p, for: w) { result in
+          switch result {
+          case .success(true): done(true)
+          case .success(false): fail(AppIssue("已取消保存。"))
+          case .failure(let error): fail(error)
           }
-          do {
-            let data: Data
-            if let id = p["id"] as? String {
-              data = try Data(contentsOf: archive.media(id), options: .mappedIfSafe)
-            } else if let encoded = p["data"] as? String, let decoded = Data(base64Encoded: encoded)
-            {
-              data = decoded
-            } else {
-              throw AppIssue("文件内容为空。")
-            }
-            try data.write(to: url, options: .atomic)
-            done(true)
-          } catch { fail(error) }
         }
       default: throw AppIssue("未识别的桌面操作。")
       }
     } catch { fail(error) }
+  }
+  private func saveFile(_ item: Object, for window: NSWindow?, completion: @escaping (Result<Bool, Error>) -> Void) {
+    let picker = NSSavePanel()
+    if smoke {
+      picker.identifier = NSUserInterfaceItemIdentifier("PromptShelf.SmokeExport")
+      picker.directoryURL = archive.root
+    }
+    picker.nameFieldStringValue = ((item["filename"] as? String ?? "截图.png") as NSString).lastPathComponent
+    picker.canCreateDirectories = true
+    let respond: (NSApplication.ModalResponse) -> Void = { response in
+      guard response == .OK, let url = picker.url else { completion(.success(false)); return }
+      do {
+        let data: Data
+        if let id = item["id"] as? String {
+          data = try Data(contentsOf: self.archive.media(id), options: .mappedIfSafe)
+        } else if let encoded = item["data"] as? String, let decoded = Data(base64Encoded: encoded) {
+          data = decoded
+        } else { throw AppIssue("文件内容为空。") }
+        try data.write(to: url, options: .atomic)
+        completion(.success(true))
+      } catch { completion(.failure(error)) }
+    }
+    if let window {
+      picker.beginSheetModal(for: window, completionHandler: respond)
+    } else {
+      NSApp.activate(ignoringOtherApps: true)
+      picker.begin(completionHandler: respond)
+    }
   }
   func settings() -> Object {
     [

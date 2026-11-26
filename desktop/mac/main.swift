@@ -17,18 +17,14 @@ MainActor.assumeIsolated {
       root.appendingPathComponent("instance.lock").path, O_RDWR | O_CREAT, 0o600)
     if lockFD < 0 { throw AppIssue("无法创建词匣数据目录。") }
     if flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
-      if let id = Bundle.main.bundleIdentifier,
-        let other = NSRunningApplication.runningApplications(withBundleIdentifier: id).first(
-          where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier })
-      {
-        other.activate(options: [])
-      }
+      if !smoke { DistributedNotificationCenter.default().postNotificationName(
+        DesktopApp.reopenNotification, object: nil, userInfo: nil, deliverImmediately: true) }
       exit(0)
     }
     guard let resources = Bundle.main.resourceURL else { throw AppIssue("应用资源缺失，请从安装包重新复制。") }
     let store = try Archive(root: root)
     let app = NSApplication.shared
-    app.setActivationPolicy(.regular)
+    app.setActivationPolicy(.accessory)
     let appDelegate = DesktopApp(
       archive: store, webRoot: resources.appendingPathComponent("Web", isDirectory: true),
       smoke: smoke)

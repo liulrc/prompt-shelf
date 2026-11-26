@@ -121,11 +121,13 @@ import ApplicationServices
     let maxY = state()[2]
     var result: CGImage?
     var ended = false
+    var destination: CaptureDestination?
     var s = NativeCaptureSession(isLong: false, automatic: false)
     func attach() {
       s.onStatus = { print("status:", $0) }
-      s.onFinish = {
-        result = $0
+      s.onFinish = { image, action in
+        result = image
+        destination = action
         ended = true
       }
       select(s)
@@ -156,7 +158,7 @@ import ApplicationServices
           pump(0.30)
         }
         setScroll(maxY)
-        click("完成并编辑")
+        click("置顶")
       } else {
         check(
           ownerAtPoint() == state()[0], "external test page was obscured before automatic wheel")
@@ -165,6 +167,7 @@ import ApplicationServices
       let receipt = wait(35) { ended }
       if !receipt { print("last status:", label()) }
       check(receipt && result != nil, "long capture completion " + mode)
+      check(destination == (mode == "manual" ? .pin : .edit), "stitched result kept chosen destination")
       let img = result!
       let scale = Double(s.frameHeight) / Double(selection.height)
       let expected = s.frameHeight + Int(Double(maxY) * scale)
@@ -198,11 +201,34 @@ import ApplicationServices
         try! bytes.representation(using: .png, properties: [:])!.write(to: file)
       }
     }
-    attach()
-    check(wait(5) { button("编辑截图") != nil } && !ended, "normal selection stays open")
-    click("编辑截图")
-    check(ended && result?.height == s.frameHeight, "ordinary capture")
-    print("normal", result!.width, result!.height)
+    for (title, action) in [("编辑截图", CaptureDestination.edit), ("复制", .copy), ("保存", .save), ("置顶", .pin)] {
+      result = nil
+      ended = false
+      s = NativeCaptureSession(isLong: false, automatic: false)
+      attach()
+      check(wait(5) { button("编辑截图") != nil } && !ended, "normal selection stays open")
+      click(title)
+      check(ended && result?.height == s.frameHeight && destination == action, "ordinary capture " + title)
+      print("normal", title, result!.width, result!.height)
+    }
+    for long in [false, true] {
+      result = nil
+      ended = false
+      s = NativeCaptureSession(isLong: false, automatic: false)
+      attach()
+      check(wait(5) { button("复制") != nil }, "toolbar ready for Escape")
+      if long { click("滚动长截图"); setScroll(55); pump(0.25) }
+      let fixturePID = pid_t(state()[0])
+      NSRunningApplication(processIdentifier: fixturePID)?.activate(options: [])
+      check(wait(2) { NSWorkspace.shared.frontmostApplication?.processIdentifier == fixturePID },
+        "external page holds focus before Escape")
+      for down in [true, false] {
+        CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: down)?.post(tap: .cghidEventTap)
+      }
+      check(wait(2) { ended } && result == nil && tools().isEmpty, "Escape cancelled live capture")
+      print("Escape cancelled with external fixture focused, long", long)
+      setScroll(0)
+    }
     simulate("manual")
     simulate("auto")
     print(
