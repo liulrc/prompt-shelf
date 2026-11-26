@@ -132,12 +132,12 @@
 
     // For dense changes, unique blocks make stable anchors. A longest
     // increasing subsequence keeps anchors in the same order in both texts.
-    function anchors(a0, a1, b0, b1) {
+    function anchors(a0, a1, b0, b1, maxWidth = 16) {
       const n = a1 - a0;
       const m = b1 - b0;
       anchorBudget -= n + m;
       if (anchorBudget < 0) return [];
-      const width = Math.min(16, Math.max(4, Math.floor(Math.min(n, m) / 8)));
+      const width = Math.min(maxWidth, Math.max(4, Math.floor(Math.min(n, m) / 8)));
       if (Math.min(n, m) < width) return [];
       const middleA = (a0 + a1 - width) / 2;
       const middleB = (b0 + b1 - width) / 2;
@@ -181,7 +181,10 @@
         candidate.previous = lo ? tails[lo - 1] : null;
         tails[lo] = candidate;
       }
-      if (!tails.length) return fallback ? [fallback] : [];
+      if (!tails.length) {
+        if (fallback) return [fallback];
+        return width > 4 ? anchors(a0, a1, b0, b1, Math.max(4, width >> 1)) : [];
+      }
       const ordered = [];
       for (let entry = tails[tails.length - 1]; entry; entry = entry.previous) {
         const next = ordered[ordered.length - 1];
