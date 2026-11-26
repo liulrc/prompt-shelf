@@ -375,6 +375,7 @@ class NativeShelf {
             return;
         closing = true;
         HWND handle = window, old = previous;
+        bool foreground = GetAncestor(GetForegroundWindow(), GA_ROOT) == handle;
         DestroyWindow(handle);
         window = edit = list = previous = nullptr;
         filtered.clear();
@@ -389,7 +390,7 @@ class NativeShelf {
         DeleteObject(control);
         paper = control = nullptr;
         closing = false;
-        if (restore && old && IsWindow(old))
+        if (restore && foreground && old && IsWindow(old) && IsWindowVisible(old) && !IsIconic(old))
             SetForegroundWindow(old);
     }
 };

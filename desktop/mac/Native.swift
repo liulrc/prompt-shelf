@@ -59,7 +59,8 @@ private func handleNativeShortcut(
   // Carbon's application event target delivers on the main AppKit event loop.
   let service = Unmanaged<NativeServices>.fromOpaque(context).takeUnretainedValue()
   let hotkeyID = id.id
-  DispatchQueue.main.async { [weak service] in service?.fire(hotkeyID) }
+  let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
+  DispatchQueue.main.async { [weak service] in service?.handleKey(hotkeyID, pressed: pressed) }
   return noErr
 }
 
@@ -84,6 +85,7 @@ private final class PinnedPanel: NSPanel {
   private var eventHandler: EventHandlerRef?
   private var registered: [Shortcut: (id: UInt32, ref: EventHotKeyRef)] = [:]
   private var actionForID: [UInt32: String] = [:]
+  private var heldHotkeys = Set<UInt32>()
   private var nextID: UInt32 = 1
   private(set) var pinnedWindows = [String: NSPanel]()
   private var session: NativeCaptureSession?
@@ -231,7 +233,9 @@ private final class PinnedPanel: NSPanel {
   }
 
   @discardableResult
-  func setHotkeys(_ settings: [String: String], partial: Bool = false) throws -> [String] {
+  func setHotkeys(
+    _ settings: [String: String], partial: Bool = false, previous: [String: String] = [:]
+  ) throws -> [String] {
     var desired: [Shortcut: String] = [:]
     var conflicts: [String] = []
     for (action, value) in settings.sorted(by: { $0.key < $1.key }) where !value.isEmpty {
@@ -246,10 +250,11 @@ private final class PinnedPanel: NSPanel {
       desired[shortcut] = action
     }
     if eventHandler == nil {
-      var spec = EventTypeSpec(
-        eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+      var events = [kEventHotKeyPressed, kEventHotKeyReleased].map {
+        EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32($0))
+      }
       let result = InstallEventHandler(
-        GetApplicationEventTarget(), handleNativeShortcut, 1, &spec,
+        GetApplicationEventTarget(), handleNativeShortcut, events.count, &events,
         Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
       guard result == noErr else { throw NativeFailure("无法安装系统快捷键处理程序（\(result)）。") }
     }
@@ -263,7 +268,7 @@ private final class PinnedPanel: NSPanel {
         shortcut.key, shortcut.flags, EventHotKeyID(signature: hotkeySignature, id: id),
         GetApplicationEventTarget(), UInt32(kEventHotKeyExclusive), &reference)
       guard result == noErr, let reference else {
-        if partial {
+        if partial || previous[action] == settings[action] {
           conflicts.append(settings[action] ?? action)
           accepted.removeValue(forKey: shortcut)
           continue
@@ -275,6 +280,7 @@ private final class PinnedPanel: NSPanel {
     }
     for (shortcut, entry) in registered where accepted[shortcut] == nil {
       UnregisterEventHotKey(entry.ref)
+      heldHotkeys.remove(entry.id)
     }
     registered = registered.filter { accepted[$0.key] != nil }
     registered.merge(added) { old, _ in old }
@@ -284,8 +290,12 @@ private final class PinnedPanel: NSPanel {
       })
     return conflicts.sorted()
   }
-  fileprivate func fire(_ id: UInt32) {
-    if let action = actionForID[id] { onHotkey?(action) }
+  fileprivate func handleKey(_ id: UInt32, pressed: Bool) {
+    if !pressed {
+      heldHotkeys.remove(id)
+      return
+    }
+    if let action = actionForID[id], heldHotkeys.insert(id).inserted { onHotkey?(action) }
   }
 
   var isCapturing: Bool { session != nil }
@@ -329,7 +339,7 @@ private final class PinnedPanel: NSPanel {
     session = capture
     capture.begin()
   }
-  func stopCapture() { session?.finish() }
+  func cancelCapture() { session?.cancel() }
   func pin(_ item: [String: Any]) throws { try pinMany([item]) }
 
   func pinMany(_ items: [[String: Any]]) throws {

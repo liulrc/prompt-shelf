@@ -22,21 +22,24 @@
         <div id="canvas" hidden>
           <img id="photo" alt="当前截图" draggable="false">
           <svg id="marks" aria-label="标注图层" preserveAspectRatio="none"></svg>
+          <svg id="selection" aria-hidden="true" preserveAspectRatio="none"></svg>
         </div>
       </div>
     </section>
     <footer class="edit-footer">
       <div id="toolbar" role="toolbar" aria-label="标注与输出">
         <div class="tools" role="group" aria-label="标注工具">
+          <button type="button" data-tool="select" aria-label="选择标注" title="选择、移动与缩放" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="m5 3 14 10-7 1-3 7z"/></svg></button>
           <button type="button" data-tool="rect" aria-label="矩形" title="矩形" aria-pressed="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1.3"/></svg></button>
           <button type="button" data-tool="line" aria-label="直线" title="直线" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="m4 20 16-16"/></svg></button>
           <button type="button" data-tool="arrow" aria-label="箭头" title="箭头" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="m4 20 15-15m-9 0h9v9"/></svg></button>
           <button type="button" data-tool="text" aria-label="文字标注" title="文字标注" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 7V4h16v3M12 4v16m-4 0h8"/></svg></button>
+          <button type="button" data-tool="mosaic" aria-label="马赛克" title="涂抹马赛克" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M3 3h18v18H3zM3 9h18M3 15h18M9 3v18m6-18v18"/><path fill="currentColor" stroke="none" d="M3 3h6v6H3zm12 0h6v6h-6zM9 9h6v6H9zm-6 6h6v6H3zm12 0h6v6h-6z"/></svg></button>
         </div>
         <label class="color-label" title="标注颜色"><input type="color" id="color" aria-label="标注颜色" value="#e34a36"></label>
-        <select id="size" aria-label="文字像素字号" title="文字字号（原图像素）" hidden>
-          <option>16</option><option>24</option><option selected>32</option><option>48</option><option>64</option><option>96</option>
-        </select>
+        <label id="size-label" class="option-label" hidden>字号 <input id="size" type="number" min="8" max="512" value="32" aria-label="文字像素字号"></label>
+        <button type="button" class="quiet" id="edit-text" hidden>改文字</button>
+        <label id="brush-label" class="option-label" hidden>画笔 <select id="brush" aria-label="马赛克画笔直径"><option value="24">细</option><option value="48" selected>中</option><option value="96">粗</option></select></label>
         <button type="button" id="undo" class="tool-button" aria-label="撤销标注" title="撤销标注" disabled><svg viewBox="0 0 24 24"><path d="m8 5-5 5 5 5M3 10h10a6 6 0 0 1 1 12"/></svg></button>
         <div class="outputs">
           <button type="button" class="quiet" id="cancel">取消</button>

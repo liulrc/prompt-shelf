@@ -50,6 +50,7 @@ class Panel : public std::enable_shared_from_this<Panel> {
     ICoreWebView2Environment *environment = nullptr;
     std::function<std::pair<fs::path, string>(const wstring &)> resolveMedia;
     bool ready = false;
+    HWND previousForeground = nullptr;
     std::vector<Json> pending;
     std::deque<Json> requests;
     fs::path distribution, userData, mediaPath;
@@ -74,9 +75,11 @@ class Panel : public std::enable_shared_from_this<Panel> {
             }
             if (m == WM_SIZE && p->controller) {
                 p->resize();
-                p->controller->put_IsVisible(wp != SIZE_MINIMIZED);
+                p->controller->put_IsVisible(wp != SIZE_MINIMIZED && IsWindowVisible(hwnd));
                 return 0;
             }
+            if (m == WM_SHOWWINDOW && p->controller)
+                p->controller->put_IsVisible(wp && !IsIconic(hwnd));
             if (m == WM_SETFOCUS && p->controller) {
                 p->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                 return 0;
@@ -290,13 +293,14 @@ class Panel : public std::enable_shared_from_this<Panel> {
                                      p->pending.clear();
                                      for (auto &m : initial)
                                          p->post(m);
-                                     p->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                                     if (p->visible() && GetForegroundWindow() == p->hwnd)
+                                         p->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                                      return S_OK;
                                  }));
         web->add_NavigationCompleted(done, &token);
         done->Release();
         resize();
-        controller->put_IsVisible(TRUE);
+        controller->put_IsVisible(visible());
         web->Navigate(url.c_str());
     }
 
@@ -308,9 +312,24 @@ class Panel : public std::enable_shared_from_this<Panel> {
           std::function<void(Panel &, const Json &)> bridge, std::function<void(HWND)> close)
         : resolveMedia(std::move(resolver)), distribution(ui), userData(data / L"WebView"),
           mediaPath(media), dispatch(std::move(bridge)), closed(std::move(close)), kind(std::move(name)) {}
+    bool visible() const {
+        return hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    }
+    void rememberForeground(HWND previous) {
+        if (previous && GetAncestor(previous, GA_ROOT) != hwnd)
+            previousForeground = previous;
+    }
+    void hideFromShortcut() {
+        bool foreground = GetAncestor(GetForegroundWindow(), GA_ROOT) == hwnd;
+        ShowWindow(hwnd, SW_HIDE);
+        if (foreground && previousForeground && IsWindow(previousForeground) &&
+            IsWindowVisible(previousForeground) && !IsIconic(previousForeground))
+            SetForegroundWindow(previousForeground);
+        previousForeground = nullptr;
+    }
     void show() {
         if (hwnd) {
-            ShowWindow(hwnd, SW_RESTORE);
+            ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
             SetForegroundWindow(hwnd);
             return;
         }
@@ -326,7 +345,7 @@ class Panel : public std::enable_shared_from_this<Panel> {
         RECT r = mi.rcWork;
         w = std::min(w, (int)(r.right - r.left));
         h = std::min(h, (int)(r.bottom - r.top));
-        DWORD ex = editor || gallery ? WS_EX_TOPMOST | WS_EX_TOOLWINDOW : 0;
+        DWORD ex = editor ? WS_EX_TOPMOST | WS_EX_APPWINDOW : gallery ? WS_EX_TOPMOST | WS_EX_TOOLWINDOW : 0;
         const wchar_t *caption = settings  ? L"词匣 · 设置"
                                  : editor  ? L"截图编辑"
                                  : gallery ? L"近期截图"
@@ -368,7 +387,7 @@ class Panel : public std::enable_shared_from_this<Panel> {
                                     auto controller = BIND_HANDLER(
                                         ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, HRESULT,
                                         ICoreWebView2Controller *, ([weak](HRESULT hr, auto *c) {
-                                            if (auto p = weak.lock()) {
+                                            if (auto p = weak.lock(); p && p->hwnd) {
                                                 if (FAILED(hr) || !c)
                                                     p->failed();
                                                 else

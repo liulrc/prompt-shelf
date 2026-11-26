@@ -25,8 +25,28 @@ extension DesktopApp {
           ) as? Object
         guard startup?["active"] as? Bool == true, startup?["route"] as? String == "#personal"
         else { throw AppIssue("主界面未进入我的模板：\(String(describing:startup))") }
+        let library = try await js(
+          v,
+          """
+          const nav=area=>document.querySelector('[data-nav="'+area+'"]').click();
+          nav('builtin');
+          for (const name of ['视频','文案','开发','办公','研究']) {
+            document.querySelector('[data-filter="'+name+'"]').click();
+            if (document.querySelectorAll('.card[data-open]').length<20) return false;
+          }
+          document.querySelector('[data-filter="视频"]').click();
+          const sample=window.PROMPT_LIBRARY.find(t=>t.category==='视频' && t.source?.url?.includes('//design.minimax.'));
+          if (!sample) return false;
+          document.querySelector('.card[data-open="'+sample.id+'"]').click();
+          const source=document.querySelector('.pe-source-credit a');
+          if (!source || !source.href.includes('minimax.') || !document.querySelector('#pe-raw')?.value.includes('【例：')) return false;
+          document.querySelector('[data-ed="cancel"]').click();nav('personal');
+          return document.querySelectorAll('.card[data-open]').length===0;
+          """)
+        guard library as? Bool == true else { throw AppIssue("分类模板、来源或个人库隔离检查失败") }
         guard let settings = startup?["settings"] as? Object,
-          settings["hotkeys"] as? [String: String] == defaultsForSmoke
+          settings["hotkeys"] as? [String: String] == defaultsForSmoke,
+          settings["showTrayIcon"] as? Bool == true, statusItem != nil
         else {
           throw AppIssue("四个发布默认快捷键不匹配")
         }
@@ -38,6 +58,15 @@ extension DesktopApp {
         ])
         try native.setHotkeys(keyMap)
         hotkeys = keyMap
+        if CGPreflightScreenCaptureAccess() {
+          handleShortcut("capture")
+          guard native.isCapturing else { throw AppIssue("截图快捷键未打开选区") }
+          handleShortcut("capture")
+          guard !native.isCapturing, try archive.captures().isEmpty else {
+            throw AppIssue("截图快捷键未取消选区")
+          }
+          print("PASS screenshot selection opened and cancelled without archiving a frame")
+        }
         _ = try await js(
           v,
           "await PromptDesktop.request('clipboard.write',{type:'text',text:'词匣桥接测试·带换行\\n第二行'}); return true"
@@ -181,6 +210,10 @@ extension DesktopApp {
           }return false;
           """)
         guard whole as? Bool == true else { throw AppIssue("长图在编辑窗中首次显示不完整") }
+        handleShortcut("capture")
+        try await waitFor { self.windows[tallKey]?.isMiniaturized == true }
+        showWeb(tallKey)
+        try await waitFor { self.windows[tallKey]?.isKeyWindow == true }
         let reopened = try await js(
           v,
           """
@@ -223,12 +256,57 @@ extension DesktopApp {
         guard controls as? Int == 8 else { throw AppIssue("设置页快捷键控件不完整") }
         _ = try await js(
           sets,
-          "const s=await PromptDesktop.request('settings.get');s.monitoring=false;await PromptDesktop.request('settings.set',s);return true"
+          "const s=await PromptDesktop.request('settings.get');s.monitoring=false;s.showTrayIcon=false;await PromptDesktop.request('settings.set',s);return true"
         )
-        guard !monitoring, FileManager.default.fileExists(atPath: settingsFile.path) else {
+        let savedSettings =
+          try JSONSerialization.jsonObject(with: Data(contentsOf: settingsFile)) as? Object
+        guard !monitoring, statusItem == nil, savedSettings?["showTrayIcon"] as? Bool == false
+        else {
           throw AppIssue("设置未保存")
         }
-        toggleShelf()
+        handleShortcut("templates")
+        try await waitFor { self.mainArea == "personal" }
+        _ = try await js(
+          v,
+          """
+          document.querySelector('[data-act="new"]').click();
+          const field=document.querySelector('#pe-raw');field.value='测试未保存的改写';
+          field.dispatchEvent(new Event('input',{bubbles:true}));return true
+          """)
+        try await waitFor { self.mainEditing }
+        handleShortcut("templates")
+        guard windows["main"]?.isVisible == false else { throw AppIssue("模板快捷键未收起编辑器") }
+        handleShortcut("templates")
+        guard windows["main"]?.isVisible == true,
+          try await js(v, "return document.querySelector('#pe-raw')?.value") as? String
+            == "测试未保存的改写"
+        else { throw AppIssue("模板快捷键切换丢失草稿") }
+        handleShortcut("pin")
+        handleShortcut("pin")
+        guard windows["gallery"] == nil else { throw AppIssue("图库快捷键未关闭") }
+        _ = try await js(
+          sets,
+          "const s=await PromptDesktop.request('settings.get');s.showTrayIcon=true;await PromptDesktop.request('settings.set',s);return true"
+        )
+        guard statusItem?.menu != nil else { throw AppIssue("菜单栏图标未恢复") }
+        guard let menu = statusItem?.menu, let item = menu.item(withTitle: "自动记录剪贴板"),
+          item.state == .off
+        else { throw AppIssue("菜单栏缺少监听开关") }
+        menu.performActionForItem(at: menu.index(of: item))
+        guard monitoring, statusItem?.menu?.item(withTitle: "自动记录剪贴板")?.state == .on else {
+          throw AppIssue("菜单栏切换监听失败")
+        }
+        let synchronized = try await js(
+          sets,
+          """
+          for(let i=0;i<20;i++){if(document.querySelector('#monitoring').checked)return true;
+          await new Promise(r=>setTimeout(r,50))}return false
+          """)
+        guard synchronized as? Bool == true else { throw AppIssue("监听开关未同步到设置窗口") }
+        handleShortcut("shelf")
+        handleShortcut("shelf")
+        guard shelf == nil else { throw AppIssue("剪贴板快捷键未收起") }
+        handleShortcut("shelf")
         guard let popup = shelf, popup.isVisible,
           let search = popup.contentView?.subviews.compactMap({ $0 as? NSSearchField }).first
         else {

@@ -3,6 +3,7 @@
   const desktop = window.PromptDesktop;
   const form = document.querySelector('#settings');
   const monitoring = document.querySelector('#monitoring');
+  const trayIcon = document.querySelector('#show-tray-icon');
   const message = document.querySelector('#message');
   const save = document.querySelector('#save');
   const hotkeys = document.querySelector('#hotkeys');
@@ -16,6 +17,8 @@
   let saving = false;
   const controls = new Map();
   const isMac = /mac/i.test(navigator.platform);
+  if (!isMac) document.querySelector('#tray-label').textContent = '显示系统托盘图标';
+  document.querySelector('#quit').onclick = () => desktop.request('app.quit').catch(error => { message.textContent = error.message; });
   function select(label, values, format) {
     const node = document.createElement('select');
     node.setAttribute('aria-label', label);
@@ -53,6 +56,9 @@
   }
   document.querySelector('#defaults').onclick = () => { applyHotkeys({}); message.textContent = '已填入默认快捷键，保存后生效。'; };
   form.onchange = () => { message.textContent = ''; };
+  desktop.on('settings.changed', value => {
+    if (typeof value?.monitoring === 'boolean') monitoring.checked = value.monitoring;
+  });
   form.onsubmit = async event => {
     event.preventDefault();
     if (!loaded || saving) return;
@@ -62,8 +68,8 @@
     }
     saving = true; setEnabled(false); message.textContent = '正在应用…';
     try {
-      await desktop.request('settings.set', {hotkeys, monitoring:monitoring.checked});
-      message.textContent = '设置已保存。';
+      const value = await desktop.request('settings.set', {hotkeys, monitoring:monitoring.checked, showTrayIcon:trayIcon.checked});
+      message.textContent = '设置已保存。' + (value?.hotkeyIssue || '');
     } catch (error) { message.textContent = error.message || '设置未保存，请重试。'; }
     finally { saving = false; setEnabled(true); save.focus(); }
   };
@@ -72,6 +78,7 @@
     try {
       const value = await desktop.request('settings.get');
       applyHotkeys(value.hotkeys || {}); monitoring.checked = !!value.monitoring;
+      trayIcon.checked = value.showTrayIcon !== false;
       if (value.hotkeyIssue) message.textContent = String(value.hotkeyIssue);
       loaded = true; setEnabled(true);
     } catch (error) { message.textContent = error.message; }

@@ -224,12 +224,17 @@
     if (reset) Object.assign(state,{query:'',category:'全部'});
     try { history.replaceState(null, '', '#' + area); } catch { /* Some local WebViews restrict history writes. */ }
     layout(); drawContent(); window.scrollTo(0,0); document.title=areaNames[area]+' · 词匣';
+    notifyRoute();
+  }
+  function notifyRoute() {
+    if (desktop) desktop.request('window.routeChanged', {area:state.area, editing:state.editing}).catch(error=>notify(error.message));
   }
   let previousScroll=0;
   function openEditor(record,origin,trigger) {
     previousScroll=window.scrollY;
     lastFocus=trigger?.dataset.open || '';
     state.editing=true;
+    notifyRoute();
     layout();
     window.scrollTo(0,0);
     document.title='编辑器 · 词匣';

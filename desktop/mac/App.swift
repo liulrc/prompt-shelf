@@ -12,13 +12,15 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   let webRoot: URL
   var windows = [String: NSWindow](), views = [String: WKWebView]()
   var ready = Set<String>(), pendingArea: String?
+  var mainArea = "", mainEditing = false
+  var latestCaptureEditor: String?
   var pendingEditors = [String: Object]()
   var returnAfterClosing = [String: NSRunningApplication]()
   var captureReturnApp: NSRunningApplication?
   var hiddenForCapture = [String](), captureOriginWindow: String?
   var shelf: ShelfPanel?, statusItem: NSStatusItem?, returnApp: NSRunningApplication?,
     lastExternal: NSRunningApplication?
-  var hotkeys = defaults, monitoring = true, lastIssue = "",
+  var hotkeys = defaults, monitoring = true, showTrayIcon = true, lastIssue = "",
     hotkeyIssue = ""
   var settingsFile: URL { archive.root.appendingPathComponent("Settings.json") }
   let smoke: Bool
@@ -37,6 +39,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         hotkeys = map
       }
       monitoring = dict["monitoring"] as? Bool ?? true
+      showTrayIcon = dict["showTrayIcon"] as? Bool ?? true
     }
   }
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -47,7 +50,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         report(error.localizedDescription)
       }
     }
-    native.onHotkey = { [weak self] action in self?.performAction(action) }
+    native.onHotkey = { [weak self] action in self?.handleShortcut(action) }
     native.onStatus = { [weak self] text in self?.report(text) }
     native.onCaptureEnded = { [weak self] success in self?.restoreAfterCapture(success: success) }
     native.onCapture = { [weak self] image in
@@ -61,7 +64,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         report("原图归档失败，可在编辑窗导出：" + error.localizedDescription)
       }
       do { try native.writeClipboard(image) } catch { report(error.localizedDescription) }
-      openImageEditor(item, returningTo: captureReturnApp)
+      latestCaptureEditor = openImageEditor(item, returningTo: captureReturnApp)
     }
     archive.onChange = { [weak self] in
       self?.shelf?.refresh()
@@ -88,7 +91,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       if CommandLine.arguments.contains("--background") {
         do {
           try native.setHotkeys(isolatedTestKeys)
-          print("READY background listener and shortcuts")
+          print(
+            "READY background listener and shortcuts screen=\(CGPreflightScreenCaptureAccess() ? 1 : 0)"
+          )
           fflush(stdout)
         } catch {
           fputs(error.localizedDescription, stderr)
@@ -109,7 +114,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   }
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
   {
-    showMain("personal")
+    if !flag {
+      if mainEditing { showWeb("main") } else { showMain("personal") }
+    }
     return true
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -146,13 +153,25 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     windowMenu.addItem(
       withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     NSApp.mainMenu = main
-    statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    statusItem?.button?.image = NSImage(
-      systemSymbolName: "square.stack.3d.up", accessibilityDescription: "词匣")
-    statusItem?.button?.toolTip = "词匣"
+    NSApp.windowsMenu = windowMenu
+    updateStatusItem()
+  }
+  func updateStatusItem() {
+    guard showTrayIcon else {
+      if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
+      statusItem = nil
+      return
+    }
+    if statusItem == nil {
+      statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+      statusItem?.button?.image = NSImage(
+        systemSymbolName: "square.stack.3d.up", accessibilityDescription: "词匣")
+    }
+    statusItem?.button?.toolTip = lastIssue.isEmpty ? "词匣" : lastIssue
     refreshMenu()
   }
   func refreshMenu() {
+    guard let statusItem else { return }
     let menu = NSMenu()
     for (name, key) in [
       ("我的模板", "templates"), ("剪贴板历史栏", "shelf"), ("区域截图", "capture"), ("滚动长截图", "long"),
@@ -162,6 +181,10 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       item.target = self
       item.representedObject = key
     }
+    let monitorItem = menu.addItem(
+      withTitle: "自动记录剪贴板", action: #selector(toggleMonitoring), keyEquivalent: "")
+    monitorItem.target = self
+    monitorItem.state = monitoring ? .on : .off
     if !lastIssue.isEmpty {
       menu.addItem(.separator())
       let item = menu.addItem(
@@ -171,9 +194,28 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     menu.addItem(.separator())
     menu.addItem(
       withTitle: "退出词匣", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-    statusItem?.menu = menu
+    statusItem.menu = menu
   }
   @objc func openSettings() { showWeb("settings") }
+  @objc func toggleMonitoring() {
+    let enabled = !monitoring
+    do {
+      try writeSettings(hotkeys, monitoring: enabled, icon: showTrayIcon)
+      setMonitoring(enabled)
+      refreshMenu()
+      broadcast("settings.changed", settings())
+    } catch { report(error.localizedDescription) }
+  }
+  private func setMonitoring(_ enabled: Bool) {
+    monitoring = enabled
+    if enabled { native.startMonitoring() } else { native.stopMonitoring() }
+  }
+  private func writeSettings(_ keys: [String: String], monitoring: Bool, icon: Bool) throws {
+    let json = try JSONSerialization.data(withJSONObject: [
+      "hotkeys": keys, "monitoring": monitoring, "showTrayIcon": icon,
+    ])
+    try json.write(to: settingsFile, options: .atomic)
+  }
   @objc func menuAction(_ sender: NSMenuItem) {
     if let action = sender.representedObject as? String { performAction(action) }
   }
@@ -211,6 +253,50 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     default: break
     }
   }
+  func handleShortcut(_ action: String) {
+    func visible(_ key: String) -> NSWindow? {
+      guard let window = windows[key], window.isVisible, !window.isMiniaturized else { return nil }
+      return window
+    }
+    switch action {
+    case "capture":
+      if native.isCapturing {
+        native.cancelCapture()
+      } else if let key = latestCaptureEditor, let editor = visible(key) {
+        editor.miniaturize(nil)
+        restoreShortcutFocus(key)
+      } else {
+        startCapture(long: false, automatic: false)
+      }
+    case "pin":
+      if let gallery = visible("gallery") {
+        restoreShortcutFocus("gallery")
+        gallery.close()
+      } else {
+        showWeb("gallery")
+      }
+    case "templates":
+      let atTemplates = (pendingArea ?? mainArea) == "personal" || mainEditing
+      if atTemplates, let main = visible("main") {
+        main.orderOut(nil)
+        restoreShortcutFocus("main")
+      } else {
+        if let front = NSWorkspace.shared.frontmostApplication,
+          front.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        {
+          returnAfterClosing["main"] = front
+        }
+        if atTemplates { showWeb("main") } else { showMain("personal") }
+      }
+    default: performAction(action)
+    }
+  }
+  private func restoreShortcutFocus(_ key: String) {
+    if let app = returnAfterClosing.removeValue(forKey: key), NSApp.isActive, !app.isTerminated {
+      NSApp.yieldActivation(to: app)
+      app.activate(options: [])
+    }
+  }
   func startCapture(long: Bool, automatic: Bool) {
     if native.isCapturing {
       native.captureRegion(long: long, automatic: automatic)
@@ -243,11 +329,13 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     hiddenForCapture.removeAll()
     captureReturnApp = nil
   }
-  func openImageEditor(_ item: Object, returningTo app: NSRunningApplication? = nil) {
+  @discardableResult
+  func openImageEditor(_ item: Object, returningTo app: NSRunningApplication? = nil) -> String {
     let key = "editor-" + UUID().uuidString
     pendingEditors[key] = item
     returnAfterClosing[key] = app
     showWeb(key)
+    return key
   }
   func openArchivedImage(_ id: String) throws {
     var item = try archive.publicRow(archive.raw(id))
@@ -314,6 +402,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     }
     if let w = windows[name] {
       NSApp.activate(ignoringOtherApps: true)
+      if w.isMiniaturized { w.deminiaturize(nil) }
       w.makeKeyAndOrderFront(nil)
       return
     }
@@ -401,6 +490,12 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     windows.removeValue(forKey: name)
     views.removeValue(forKey: name)
     ready.remove(name)
+    if latestCaptureEditor == name { latestCaptureEditor = nil }
+    if name == "main" {
+      mainArea = ""
+      mainEditing = false
+      pendingArea = nil
+    }
     pendingEditors.removeValue(forKey: name)
     if let app = returnAfterClosing.removeValue(forKey: name), NSApp.isActive,
       !windows.keys.contains(where: { $0.hasPrefix("editor-") })
@@ -421,6 +516,8 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     guard ready.contains("main"), let view = views["main"] else { return }
     if let area = pendingArea {
       pendingArea = nil
+      mainArea = area
+      mainEditing = false
       send(view, ["event": "route", "data": ["area": area]])
     }
 
@@ -490,27 +587,37 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         try mutateBackup(p)
         done(true)
       case "settings.get": done(settings())
+      case "window.routeChanged":
+        if v === views["main"], let area = p["area"] as? String, let editing = p["editing"] as? Bool
+        {
+          mainArea = area
+          mainEditing = editing
+        }
+        done(true)
+      case "app.quit":
+        guard v === views["settings"] else { throw AppIssue("请从设置中退出词匣。") }
+        done(true)
+        NSApp.terminate(nil)
       case "settings.set":
         guard let mapping = p["hotkeys"] as? [String: String],
           Set(mapping.keys) == Set(defaults.keys), let enabled = p["monitoring"] as? Bool
         else { throw AppIssue("快捷键或监听设置不完整。") }
         let old = hotkeys
-        try native.setHotkeys(mapping)
+        let icon = p["showTrayIcon"] as? Bool ?? showTrayIcon
+        let conflicts = try native.setHotkeys(mapping, previous: old)
         do {
-          let json = try JSONSerialization.data(withJSONObject: [
-            "hotkeys": mapping, "monitoring": enabled,
-          ])
-          try json.write(to: settingsFile, options: .atomic)
+          try writeSettings(mapping, monitoring: enabled, icon: icon)
         } catch {
           _ = try? native.setHotkeys(old, partial: true)
           throw error
         }
         hotkeys = mapping
-        monitoring = enabled
-        if enabled { native.startMonitoring() } else { native.stopMonitoring() }
-        lastIssue = ""
-        hotkeyIssue = ""
-        refreshMenu()
+        setMonitoring(enabled)
+        showTrayIcon = icon
+        hotkeyIssue =
+          conflicts.isEmpty ? "" : "快捷键 " + conflicts.joined(separator: "、") + " 已被占用，请更换组合。"
+        lastIssue = hotkeyIssue
+        updateStatusItem()
         done(settings())
         broadcast("settings.changed", settings())
       case "history.list": done(try archive.list())
@@ -617,7 +724,10 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     } catch { fail(error) }
   }
   func settings() -> Object {
-    ["hotkeys": hotkeys, "monitoring": monitoring, "hotkeyIssue": hotkeyIssue]
+    [
+      "hotkeys": hotkeys, "monitoring": monitoring, "showTrayIcon": showTrayIcon,
+      "hotkeyIssue": hotkeyIssue,
+    ]
   }
   private var backupDir: URL { archive.root.appendingPathComponent("Templates", isDirectory: true) }
   private func mutateBackup(_ p: Object) throws {

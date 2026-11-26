@@ -8,7 +8,7 @@
 static const std::array<string, 4> actions = {"capture", "shelf", "pin", "templates"};
 static const Json defaults = {
     {"hotkeys", {{"capture", "Alt+A"}, {"shelf", "Alt+Q"}, {"pin", "Alt+Z"}, {"templates", "Alt+X"}}},
-    {"monitoring", true}};
+    {"monitoring", true}, {"showTrayIcon", true}};
 static std::pair<UINT, UINT> chord(const string &value) {
     std::istringstream parts(value);
     string part;
@@ -53,19 +53,30 @@ class Application {
     int nextKey = 50, tries = 0;
     DWORD lastSeq = 0;
     bool listening = false, exiting = false, queuedCapture = false, wantLong = false, wantAuto = false;
+    bool trayVisible = false, mainEditing = false;
+    string mainArea = "builtin", latestCaptureEditor;
     std::vector<std::weak_ptr<Panel>> hidden;
     NOTIFYICONDATAW tray{sizeof(tray)};
     UINT restart = RegisterWindowMessageW(L"TaskbarCreated");
     static constexpr UINT trayEvent = WM_APP + 2;
     HWND root = nullptr;
     void notify(const string &message) {
+        if (!trayVisible)
+            return;
         tray.uFlags = NIF_INFO;
         wcscpy_s(tray.szInfoTitle, L"词匣");
         wcsncpy_s(tray.szInfo, wide(message).c_str(), _TRUNCATE);
         tray.dwInfoFlags = NIIF_INFO;
         Shell_NotifyIconW(NIM_MODIFY, &tray);
     }
-    void addTray() {
+    void setTrayVisible(bool visible, bool startup = false) {
+        if (visible == trayVisible)
+            return;
+        if (!visible) {
+            Shell_NotifyIconW(NIM_DELETE, &tray);
+            trayVisible = false;
+            return;
+        }
         tray.hWnd = root;
         tray.uID = 1;
         tray.uCallbackMessage = trayEvent;
@@ -74,7 +85,9 @@ class Application {
         if (!tray.hIcon)
             tray.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
         wcscpy_s(tray.szTip, L"词匣 · 提示词与剪贴板");
-        Shell_NotifyIconW(NIM_ADD, &tray);
+        trayVisible = Shell_NotifyIconW(NIM_ADD, &tray);
+        if (!startup)
+            require(trayVisible, "无法添加系统托盘图标，请重试。");
     }
     void setListening(bool enabled) {
         if (enabled == listening)
@@ -91,6 +104,7 @@ class Application {
     void apply(const Json &value, bool startup = false) {
         Json selected = value.value("hotkeys", settings.at("hotkeys"));
         bool enabled = value.value("monitoring", settings.value("monitoring", true));
+        bool showTray = value.value("showTrayIcon", settings.value("showTrayIcon", true));
         std::map<Chord, string> wanted;
         std::map<Chord, int> staged;
         std::map<int, string> active;
@@ -101,6 +115,7 @@ class Application {
             wanted[key] = a;
         }
         const bool oldMonitoring = listening;
+        const bool oldTray = trayVisible;
         std::vector<string> conflicts;
         try {
             for (auto &[key, a] : wanted) {
@@ -115,7 +130,7 @@ class Application {
                         id = nextKey++;
                     if (!RegisterHotKey(root, id, key.first | MOD_NOREPEAT, key.second)) {
                         auto text = selected.at(a).get<string>();
-                        if (startup) {
+                        if (startup || settings.at("hotkeys").value(a, "") == text) {
                             conflicts.push_back(text);
                             continue;
                         }
@@ -126,7 +141,8 @@ class Application {
                 active[id] = a;
             }
             setListening(enabled);
-            Json updated = {{"hotkeys", selected}, {"monitoring", enabled}};
+            setTrayVisible(showTray, startup);
+            Json updated = {{"hotkeys", selected}, {"monitoring", enabled}, {"showTrayIcon", showTray}};
             if (!startup)
                 writeJson(home / L"settings.json", updated);
             settings = updated;
@@ -134,6 +150,7 @@ class Application {
             for (auto &[key, id] : staged)
                 UnregisterHotKey(root, id);
             setListening(oldMonitoring);
+            setTrayVisible(oldTray, true);
             throw;
         }
         for (auto it = registered.begin(); it != registered.end();) {
@@ -150,14 +167,21 @@ class Application {
             for (auto &s : conflicts)
                 text += " " + s;
             settings["hotkeyIssue"] = text;
-            notify(text);
-            open("settings");
+            if (startup) {
+                notify(text);
+                open("settings");
+            }
         }
     }
     void changed() {
         shelf.refresh();
         for (auto &[k, p] : panels)
             p->post({{"event", "history.changed"}, {"data", Json::object()}});
+    }
+    void updateSettings(const Json &value) {
+        apply(value);
+        for (auto &[name, panel] : panels)
+            panel->post({{"event", "settings.changed"}, {"data", settings}});
     }
     std::shared_ptr<Panel> open(string area, string instanceKey = "") {
         if (area == "shelf") {
@@ -174,26 +198,32 @@ class Application {
                 [this](Panel &p, const Json &m) { message(p, m); },
                 [this, key](HWND) {
                     panels.erase(key);
-                    auto prior = restoreOnClose.find(key);
-                    if (prior != restoreOnClose.end()) {
-                        if (!exiting)
-                            restoreWindows(prior->second);
-                        restoreOnClose.erase(prior);
+                    if (key == latestCaptureEditor)
+                        latestCaptureEditor.clear();
+                    if (key == "main") {
+                        mainArea = "builtin";
+                        mainEditing = false;
                     }
+                    releaseCaptureWorkspace(key);
                 });
             panels[key] = p;
         }
         p->show();
-        if (kind == "main" && area != "main")
+        if (kind == "main" && area != "main") {
+            mainArea = area;
+            mainEditing = false;
             p->post({{"event", "route"}, {"data", {{"area", area}}}});
+        }
         return p;
     }
     void editImage(Json image, bool fromCapture = false) {
         require(image.value("type", "image") == "image", "只能编辑图片。");
         const string key = "editor-" + genId();
         auto panel = open("editor", key);
-        if (fromCapture)
+        if (fromCapture) {
+            latestCaptureEditor = key;
             restoreOnClose.emplace(key, std::exchange(hidden, {}));
+        }
         panel->post({{"event", "capture.ready"}, {"data", std::move(image)}});
     }
     void showPin(const string &id, Frame frame, const string &title) {
@@ -266,11 +296,15 @@ class Application {
         wantAuto = automatic;
         hidden.clear();
         for (auto &[k, p] : panels)
-            if (p->hwnd && IsWindowVisible(p->hwnd)) {
+            if (p->visible()) {
                 hidden.push_back(p);
                 ShowWindow(p->hwnd, SW_HIDE);
             }
-        SetTimer(root, 2, 180, nullptr);
+        if (!SetTimer(root, 2, 180, nullptr)) {
+            queuedCapture = false;
+            restore();
+            throw std::runtime_error("无法启动截图，请重试。");
+        }
     }
     static void restoreWindows(std::vector<std::weak_ptr<Panel>> &list) {
         for (auto &weak : list)
@@ -280,6 +314,51 @@ class Application {
         list.clear();
     }
     void restore() { restoreWindows(hidden); }
+    void releaseCaptureWorkspace(const string &key) {
+        auto prior = restoreOnClose.find(key);
+        if (prior != restoreOnClose.end()) {
+            if (!exiting)
+                restoreWindows(prior->second);
+            restoreOnClose.erase(prior);
+        }
+    }
+    void toggleCapture() {
+        if (queuedCapture) {
+            KillTimer(root, 2);
+            queuedCapture = false;
+            restore();
+            return;
+        }
+        if (capture.active()) {
+            capture.stop();
+            return;
+        }
+        // A minimized capture editor keeps its markup and remains available in the taskbar.
+        auto editor = panels.find(latestCaptureEditor);
+        if (editor != panels.end() && editor->second->visible()) {
+            HWND window = editor->second->hwnd;
+            HWND foreground = GetAncestor(GetForegroundWindow(), GA_ROOT);
+            ShowWindow(window, window == foreground ? SW_MINIMIZE : SW_SHOWMINNOACTIVE);
+            releaseCaptureWorkspace(editor->first);
+            return;
+        }
+        requestCapture(false, false);
+    }
+    void togglePanel(const string &area) {
+        bool personal = area == "personal";
+        auto it = panels.find(personal ? "main" : area);
+        bool keepMain = mainEditing || mainArea == "personal";
+        if (it != panels.end() && it->second->visible() && (!personal || keepMain)) {
+            auto panel = it->second;
+            panel->hideFromShortcut();
+            if (!personal)
+                panel->shutdown();
+            return;
+        }
+        HWND previous = GetForegroundWindow();
+        auto panel = open(personal && keepMain ? "main" : area);
+        panel->rememberForeground(previous);
+    }
     void makeCapture() {
         queuedCapture = false;
         DwmFlush();
@@ -385,10 +464,8 @@ class Application {
             if (cmd == "settings.get")
                 result = settings;
             else if (cmd == "settings.set") {
-                apply(v);
+                updateSettings(v);
                 result = settings;
-                for (auto &[name, panel] : panels)
-                    panel->post({{"event", "settings.changed"}, {"data", settings}});
             } else if (cmd == "capture.list")
                 result = archive.captureList();
             else if (cmd == "capture.pinMany")
@@ -453,6 +530,11 @@ class Application {
                     open("gallery");
             } else if (cmd == "file.save")
                 save(p, v);
+            else if (cmd == "window.routeChanged" && p.kind == "main") {
+                mainArea = v.at("area").get<string>();
+                mainEditing = v.value("editing", false);
+            } else if (cmd == "app.quit" && p.kind == "settings")
+                PostMessageW(root, WM_CLOSE, 0, 0);
             else if (cmd == "window.open") {
                 string area = v.value("area", "main");
                 require(area == "main" || area == "settings" || area == "shelf" || area == "personal" ||
@@ -482,6 +564,7 @@ class Application {
         AppendMenuW(m, MF_STRING, 12, L"截取屏幕");
         AppendMenuW(m, MF_STRING, 13, L"滚动长截图");
         AppendMenuW(m, MF_STRING, 14, L"近期截图库…");
+        AppendMenuW(m, MF_STRING | (listening ? MF_CHECKED : MF_UNCHECKED), 17, L"自动记录剪贴板");
         AppendMenuW(m, MF_STRING, 15, L"设置");
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, 16, L"退出词匣");
@@ -503,11 +586,14 @@ class Application {
             open("settings");
         if (n == 16)
             DestroyWindow(root);
+        if (n == 17)
+            updateSettings({{"monitoring", !listening}});
     }
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         try {
-            if (msg == restart) {
-                addTray();
+            if (restart && msg == restart) {
+                trayVisible = false;
+                setTrayVisible(settings.value("showTrayIcon", true), true);
                 return 0;
             }
             if (msg == WM_APP + 3) {
@@ -531,11 +617,11 @@ class Application {
                     else
                         shelf.show();
                 } else if (a->second == "templates")
-                    open("personal");
+                    togglePanel("personal");
                 else if (a->second == "capture")
-                    requestCapture(false, false);
+                    toggleCapture();
                 else
-                    open("gallery");
+                    togglePanel("gallery");
                 return 0;
             }
             if (msg == WM_CLIPBOARDUPDATE) {
@@ -548,7 +634,7 @@ class Application {
             if (msg == WM_TIMER) {
                 if (wp == 1)
                     readChange();
-                if (wp == 2) {
+                if (wp == 2 && queuedCapture) {
                     KillTimer(root, 2);
                     makeCapture();
                 }
@@ -571,12 +657,15 @@ class Application {
                     p->shutdown();
                     panels.erase(key);
                 }
-                Shell_NotifyIconW(NIM_DELETE, &tray);
+                setTrayVisible(false);
                 PostQuitMessage(0);
                 return 0;
             }
         } catch (const std::exception &e) {
-            notify(e.what());
+            if (trayVisible || (msg != WM_HOTKEY && msg != trayEvent && !(msg == WM_TIMER && wp == 2)))
+                notify(e.what());
+            else
+                MessageBoxW(nullptr, wide(e.what()).c_str(), L"词匣", MB_OK | MB_ICONWARNING);
             return 0;
         }
         return DefWindowProcW(root, msg, wp, lp);
@@ -597,7 +686,6 @@ class Application {
         root = CreateWindowW(L"CiXiaNativeService", L"词匣服务", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
                              nullptr, instance(), this);
         require(root, "后台工作区启动失败。");
-        addTray();
         if (fs::exists(home / L"settings.json")) {
             std::ifstream f(home / L"settings.json");
             settings = Json::parse(f);
