@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.promptshelf.desktop</string>
+<key>CFBundleName</key><string>词匣</string>
+<key>CFBundleDisplayName</key><string>词匣</string>
+<key>CFBundleExecutable</key><string>PromptShelf</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>100</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+<key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+<key>CFBundleLocalizations</key><array><string>zh_CN</string><string>en</string></array>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSScreenCaptureUsageDescription</key><string>词匣在你发起截图时读取所选屏幕区域，用于标注和滚动长截图。</string>
+<key>NSPasteboardUsageDescription</key><string>允许词匣记录已复制的文字、图片和文件，供你在历史卡片中再次选择。</string>
+</dict></plist>

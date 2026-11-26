@@ -38,6 +38,10 @@
   const catalog = window.PROMPT_LIBRARY;
   const model = window.PromptModel;
   const store = model.createStore();
+  const desktop = window.PromptDesktop?.active ? window.PromptDesktop : null;
+  let desktopSettings = {hotkeys:{shelf:'Alt+Q'}, monitoring:true};
+  let pendingCapture = null;
+  let acceptCapture = null;
   const categories = {
     '研究':['research','research'], '视频':['video','video'], '文案':['pen','copy'],
     '开发':['code','dev'], '办公':['briefcase','office']
@@ -49,7 +53,7 @@
   let lastFocus = '', noticeTimer;
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
 
-  const shelfKeys = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌥⇧V' : 'Alt+Shift+V';
+  const shelfKeys = () => desktop ? desktopSettings.hotkeys.shelf : /Mac|iPhone|iPad/.test(navigator.platform) ? '⌥⇧V' : 'Alt+Shift+V';
   const isTool = area => area === 'clipboard' || area === 'capture';
   const assets = new Map();
   let archive, disposeTool, closeShelf, openingShelf = false;
@@ -73,6 +77,7 @@
     return assets.get(file);
   }
   async function getArchive() {
+    if (desktop) return archive ??= desktop.archive();
     if (!archive) {
       await Promise.all([loadAsset('media.js'), loadAsset('assets/palette.js')]);
       archive ??= window.createClipboardArchive(copy);
@@ -80,6 +85,10 @@
     return archive;
   }
   async function openShelf() {
+    if (desktop) {
+      try { await desktop.request('window.open', {area:'shelf'}); } catch (error) { notify(error.message); }
+      return;
+    }
     if (openingShelf || closeShelf || document.querySelector('dialog[open]')) return;
     openingShelf = true;
     try {
@@ -90,6 +99,7 @@
   }
   async function trackPromptCopy(text) {
     await copy(text);
+    if (desktop) return;
     try { await (await getArchive()).add({type:'text',text,source:'词匣 · 提示词'}); }
     catch (error) { setTimeout(() => notify('提示词已复制。' + error.message), 300); }
   }
@@ -98,7 +108,15 @@
     try {
       const [media] = await Promise.all([getArchive(), loadAsset(area+'.css'), loadAsset(area+'.js')]);
       if (!host.isConnected) return;
-      const options = {host,icon,escape,notify,media,openShelf,onHistory:() => navigate('clipboard'),
+      const options = {host,icon,escape,notify,media,openShelf,desktop,shelfShortcut:shelfKeys(), monitoring:desktopSettings.monitoring,
+        onCaptureReady(handler) {
+          acceptCapture = handler;
+          if (pendingCapture) {
+            const saved = pendingCapture; pendingCapture = null; handler(saved);
+          }
+          return () => { if (acceptCapture === handler) acceptCapture = null; };
+        },
+        onHistory:() => navigate('clipboard'),
         saveToClipboardHistory:({blob,title}) => media.add({type:'image',blob,title,filename:title.replace(/\.png$/i,'')+'.png',source:'截图工具'})};
       const cleanup = await (area === 'clipboard' ? window.openClipboardTool(options) : window.openCaptureTool(options));
       if (host.isConnected) disposeTool = cleanup;
@@ -116,6 +134,7 @@
   }
   async function copy(text) {
     if (!text.trim()) throw new Error('提示词为空，请先输入正文。');
+    if (desktop) { await desktop.request('clipboard.write',{type:'text',text,source:'词匣 · 提示词'}); return; }
     try {
       if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return; }
     } catch { /* Older desktop browsers can still copy a selected text field. */ }
@@ -145,7 +164,7 @@
         ${navButton('builtin','library',catalog.length)}${navButton('personal','folder',store.listPersonal().length)}
         <p class="nav-group next">活动记录</p>${navButton('history','history',null)}
         <p class="nav-group next">桌面工具</p>${navButton('clipboard','clipboard',null)}${navButton('capture','capture',null)}
-      </nav><button class="side-shelf" data-act="open-shelf" title="打开快捷历史栏">${icon('keyboard',16)} 历史栏 <kbd>${shelfKeys}</kbd></button><div class="side-foot"><span class="device">${icon('box',19)}</span><div><strong>本地工作区</strong><small>${store.persistent ? '离线可用' : '仅在本次会话中保留'}</small></div></div>
+      ${desktop ? '<button class="nav-item" data-act="settings">'+icon('keyboard',17)+'<span>设置</span></button>' : ''}</nav><button class="side-shelf" data-act="open-shelf" title="打开快捷历史栏">${icon('keyboard',16)} 历史栏 <kbd>${escape(shelfKeys())}</kbd></button><div class="side-foot"><span class="device">${icon('box',19)}</span><div><strong>本地工作区</strong><small>${store.persistent ? '离线可用' : '仅在本次会话中保留'}</small></div></div>
       </aside><div class="workspace"><header class="topbar">
         <div class="crumbs"><span class="crumb-home">工作台</span>${icon('chevron',11)}<b>${areaNames[state.area]}</b>${state.editing ? icon('chevron',11)+'<b>编辑器</b>':''}</div>
          ${state.editing || isTool(state.area) ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',15)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索当前模板库'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
@@ -238,6 +257,10 @@
     if (!button || button.disabled) return;
     const {nav,filter,open,act,recopy}=button.dataset;
     if (nav) return navigate(nav);
+    if (act === 'settings' && desktop) {
+      try { await desktop.request('window.open', {area:'settings'}); } catch (error) { notify(error.message); }
+      return;
+    }
     if (act === 'open-shelf') return openShelf();
     if (filter !== undefined) { state.category=filter; drawContent(); Array.from(root.querySelectorAll('[data-filter]')).find(el=>el.dataset.filter===filter)?.focus({preventScroll:true}); return; }
     if (open) {
@@ -261,7 +284,7 @@
     }
   });
   window.addEventListener('keydown',event=>{
-    if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.code === 'KeyV' || event.key.toLowerCase() === 'v')) {
+    if (!desktop && event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.code === 'KeyV' || event.key.toLowerCase() === 'v')) {
       event.preventDefault();
       if (!event.repeat) openShelf();
       return;
@@ -277,4 +300,27 @@
   }
   window.addEventListener('hashchange', openLocation);
   openLocation();
+  if (desktop) {
+    function refreshSettings(value) {
+      if (!value?.hotkeys) return;
+      desktopSettings = value;
+      const key = root.querySelector('[data-act="open-shelf"] kbd');
+      if (key) key.textContent = shelfKeys();
+    }
+    desktop.request('settings.get').then(refreshSettings).catch(error => notify(error.message));
+    desktop.on('settings.changed', refreshSettings);
+    desktop.on('native.status', data => {
+      const message = typeof data === 'string' ? data : data?.message;
+      if (message) notify(message);
+    });
+    desktop.on('route', data => {
+      if (Object.hasOwn(areaNames, data?.area) && (state.area !== data.area || state.editing)) navigate(data.area);
+    });
+    desktop.on('capture.ready', data => {
+      if (!data || (!data.data && !data.id && !data.url)) return;
+      if (state.area === 'capture' && acceptCapture) { acceptCapture(data); return; }
+      pendingCapture = data;
+      if (state.area !== 'capture') navigate('capture');
+    });
+  }
 })();

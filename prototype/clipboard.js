@@ -51,6 +51,8 @@
     if (/^blob:|^data:(image|video)\//i.test(value)) return value;
     try {
       const url = new URL(value, document.baseURI);
+      if (window.PromptDesktop?.active && url.protocol === 'promptmedia:' && url.hostname === 'asset') return url.href;
+      if (window.PromptDesktop?.active && url.origin === 'https://media.cixia.local') return url.href;
       return (url.protocol === location.protocol && url.host === location.host &&
         ['http:', 'https:', 'file:'].includes(url.protocol)) ? url.href : '';
     } catch {
@@ -83,7 +85,7 @@
       '</strong><span class="cb-row-meta">' + escape(meta) + sample(entry) + '</span></span></button>';
   }
 
-  function detailContent(entry, {escape, icon}) {
+  function detailContent(entry, {escape, icon, desktop}) {
     if (!entry) return '<p class="cb-empty">选中一条记录后，可在这里检查完整内容。</p>';
     const url = localMediaURL(entry.url);
     const poster = localMediaURL(entry.thumbUrl);
@@ -99,8 +101,9 @@
       (poster ? ' poster="' + escape(poster) + '"' : '') + ' controls playsinline preload="metadata" aria-label="视频预览"></video>';
     const meta = [typeNames[entry.type], sourceName(entry), formattedTime(entry.createdAt),
       entry.type === 'text' && text.length <= previewLimit ? Array.from(text).length + ' 字符' : sizeLabel(entry.size)].filter(Boolean);
-    const download = entry.type !== 'text' && url
-      ? '<a class="cb-download" download="' + escape(entry.filename || entryName(entry)) + '" href="' + escape(url) + '">下载原文件</a>' : '';
+    const download = entry.type === 'text' ? '' : desktop
+      ? '<button type="button" class="cb-download" data-cb="export">另存原文件</button>'
+      : url ? '<a class="cb-download" download="' + escape(entry.filename || entryName(entry)) + '" href="' + escape(url) + '">下载原文件</a>' : '';
     const removal = entry.isDemo ? '' : '<button type="button" class="cb-remove" data-cb="remove">移除记录</button>';
     return '<div class="cb-detail-inner"><h3>' + escape(entryName(entry)) + '</h3><div class="cb-details-meta">' +
       escape(meta.join(' · ')) + sample(entry) + '</div><div class="cb-preview">' + preview + '</div>' +
@@ -127,20 +130,20 @@
     return {type, blob: data, filename: blob.name || '', title: blob.name || '导入的' + typeNames[type], source};
   }
 
-  function openClipboardTool({host, icon, escape, notify, media, openShelf}) {
-    const options = {icon, escape};
-    const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌥ ⇧ V' : 'Alt + Shift + V';
+  function openClipboardTool({host, icon, escape, notify, media, openShelf, desktop, shelfShortcut, monitoring}) {
+    const options = {icon, escape, desktop};
+    const shortcut = shelfShortcut || (/Mac|iPhone|iPad/.test(navigator.platform) ? '⌥ ⇧ V' : 'Alt + Shift + V');
     const pasteKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ V' : 'Ctrl + V';
     host.innerHTML = `
       <section class="cb-manager">
         <div class="page-intro"><div><h1>剪贴板管理</h1><p>收集要复用的文字、截图与视频，选中后即可复制。</p></div>
-          <button class="btn primary" type="button" data-cb="shelf">${icon('keyboard',16)}快速历史栏 <kbd>${shortcut}</kbd></button></div>
+          <button class="btn primary" type="button" data-cb="shelf">${icon('keyboard',16)}快速历史栏 <kbd>${escape(shortcut)}</kbd></button></div>
         <section class="cb-capture" aria-label="收录剪贴内容">
           <div><strong>收录内容</strong><p>在页面空白处按 <kbd>${pasteKey}</kbd> 粘贴，也可将文件拖到这里。</p></div>
           <div class="cb-buttons"><button class="btn" type="button" data-cb="files">${icon('folder',15)}导入文件</button>
             <button class="btn" type="button" data-cb="read">${icon('plus',15)}读取剪贴板</button></div>
           <input type="file" accept="image/*,video/*,text/*,.txt,.md,.csv" multiple hidden data-cb="file-input">
-          <div class="cb-native"><label><input type="checkbox" role="switch" disabled>跨应用自动记录</label><span>桌面版功能</span></div>
+          <div class="cb-native"><label><input type="checkbox" role="switch" disabled ${desktop && monitoring ? 'checked' : ''}>跨应用自动记录</label>${desktop ? '<button type="button" class="cb-download" data-cb="settings">前往设置</button>' : '<span>桌面版功能</span>'}</div>
         </section>
         <div class="cb-status" role="status" aria-live="polite"></div>
         <div class="cb-toolbar"><div class="filters" role="group" aria-label="按内容类型筛选">
@@ -160,6 +163,7 @@
     const capture = page.querySelector('.cb-capture');
     const detail = page.querySelector('.cb-detail-body');
     let alive = true, version = 0, entries = [], selected = '', filter = 'all', busy = false;
+    let detailVersion = 0;
     const current = () => alive && page.isConnected;
     function message(text) { if (current()) status.textContent = text; }
 
@@ -172,14 +176,24 @@
       page.querySelector('.cb-items').innerHTML = filtered.length
         ? filtered.map(entry => entryRow(entry, entry.id === selected, options)).join('')
         : '<p class="cb-empty">' + (entries.length ? '没有匹配的记录，试试其他关键词或类型。' : '粘贴一段文字或导入文件，开始收录。') + '</p>';
-      detail.innerHTML = detailContent(active, options);
-      detail.querySelector('.cb-preview img, .cb-preview video')?.addEventListener('error', event => {
-        const note = document.createElement('p');
-        note.textContent = '此浏览器无法预览该格式，可下载原文件。';
-        event.target.replaceWith(note);
-      }, {once:true});
+      const detailRequest = ++detailVersion;
+      function showDetail(entry) {
+        if (!current() || detailRequest !== detailVersion) return;
+        detail.innerHTML = detailContent(entry, options);
+        detail.querySelector('.cb-preview img, .cb-preview video')?.addEventListener('error', event => {
+          const note = document.createElement('p');
+          note.textContent = desktop ? '此格式无法预览，可另存原文件。' : '此浏览器无法预览该格式，可下载原文件。';
+          event.target.replaceWith(note);
+        }, {once:true});
+      }
+      showDetail(active);
+      if (active && active.type !== 'text' && !active.url && media.detail) {
+        media.detail(active).then(showDetail).catch(error => {
+          if (current() && detailRequest === detailVersion) message(error.message);
+        });
+      }
       page.querySelector('.cb-footnote').textContent =
-        '网页原型仅在当前页面接收粘贴，快捷键仅在词匣窗口内生效。' +
+        (desktop ? '剪贴板历史保存在本机。' : '网页原型仅在当前页面接收粘贴，快捷键仅在词匣窗口内生效。') +
         (media.persistent === false ? '当前浏览器仅在本次会话中保留记录。' : '');
     }
 
@@ -211,6 +225,14 @@
     }
 
     async function readSystem() {
+      if (desktop) {
+        busy = true;
+        try {
+          await desktop.request('clipboard.read'); await reload(); message('已读取当前剪贴板。');
+        } catch (error) { message(error.message); }
+        finally { busy = false; }
+        return;
+      }
       const access = navigator.clipboard;
       if (!access?.read && !access?.readText) {
         message('当前浏览器未提供直接读取。请点击页面空白处并按 ' + pasteKey + '，或使用「导入文件」。'); return;
@@ -279,6 +301,16 @@
       if (!button || button.disabled) return;
       switch (button.dataset.cb) {
         case 'shelf': openShelf(); break;
+        case 'settings':
+          try { await desktop.request('window.open', {area:'settings'}); } catch (error) { message(error.message); }
+          break;
+        case 'export': {
+          const entry = entries.find(item => item.id === selected);
+          if (!entry) break;
+          try { await desktop.request('file.save',{id:entry.id,filename:entry.filename || entryName(entry)}); }
+          catch (error) { message(error.message); }
+          break;
+        }
         case 'files': files.click(); break;
         case 'read': if (!busy) await readSystem(); break;
         case 'remove': {
@@ -335,9 +367,16 @@
     });
     document.addEventListener('paste', paste);
     const unsubscribe = media.subscribe(reload);
+    function applySettings(settings) {
+      if (!current() || !settings?.hotkeys) return;
+      page.querySelector('.cb-native input').checked = !!settings.monitoring;
+      page.querySelector('[data-cb="shelf"] kbd').textContent = settings.hotkeys.shelf;
+    }
+    const unsubscribeSettings = desktop?.on('settings.changed', applySettings);
+    if (desktop) desktop.request('settings.get').then(applySettings).catch(error => message(error.message));
     void reload();
     return () => {
-      alive = false; unsubscribe(); document.removeEventListener('paste', paste);
+      alive = false; unsubscribe(); unsubscribeSettings?.(); document.removeEventListener('paste', paste);
     };
   }
 

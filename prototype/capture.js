@@ -1,7 +1,9 @@
 (() => {
   'use strict';
 
-  const MAX_PIXELS = 24000000;
+  const MAX_PIXELS = window.PromptDesktop?.active
+    ? (/mac/i.test(navigator.platform) ? 32000000 : 64000000)
+    : 24000000;
   const MAX_SIDE = 32767;
   const colors = ['#cc492f', '#326ca8', '#d6a519'];
   const icons = {
@@ -25,7 +27,7 @@
   const validSize = (w,h) => w>0 && h>0 && w<=MAX_SIDE && h<=MAX_SIDE && w*h<=MAX_PIXELS;
 
   function surface(w,h) {
-    if (!validSize(w,h)) throw new Error('图片过大，请将宽高控制在 32767 像素内、总面积控制在 2400 万像素内。');
+    if (!validSize(w,h)) throw new Error('图片过大，请将宽高控制在 32767 像素内、总面积控制在 '+(MAX_PIXELS/10000)+' 万像素内。');
     const el=document.createElement('canvas'); el.width=w; el.height=h;
     return el;
   }
@@ -115,16 +117,18 @@
     header.onkeydown=e=>{const delta={ArrowLeft:[-12,0],ArrowRight:[12,0],ArrowUp:[0,-12],ArrowDown:[0,12]}[e.key];if(delta){e.preventDefault();const r=box.getBoundingClientRect();move(r.left+delta[0],r.top+delta[1]);}};
   }
 
-  window.openCaptureTool=function({host,notify,onHistory,saveToClipboardHistory}) {
+  window.openCaptureTool=function({host,notify,onHistory,saveToClipboardHistory,desktop,onCaptureReady}) {
     let alive=true, busy=false, mode='normal', tool='hand', color=colors[0], image=null, frameHeight=0;
-    let title='', savedMarkKey='', rawStored=false, stream=null, video=null, frames=[], outline=null, draft=null, sample=drawSample();
+    let title='', savedMarkKey='', rawStored=false, stream=null, video=null, frames=[], outline=null, draft=null, sample=desktop?null:drawSample();
+    let captureVersion=0;
+    let rawArchiveId='', markedArchiveId='';
     const marks=[];
-    const supported=!!navigator.mediaDevices?.getDisplayMedia;
+    const supported=!!desktop||!!navigator.mediaDevices?.getDisplayMedia;
     const $=s=>host.querySelector(s);
     host.innerHTML=`<section class="cap-work">
       <header class="cap-intro"><div><h1>截图工具</h1><p>截取画面，直接标注，并在剪贴板历史中找回。</p></div><button type="button" class="btn" data-cap="history">${glyph('history')}剪贴板历史</button></header>
       <div class="cap-sourcebar"><div class="cap-modes" role="group" aria-label="截图模式"><button type="button" data-cap-mode="normal" aria-pressed="true">${glyph('capture')}普通截图</button><button type="button" data-cap-mode="long" aria-pressed="false">${glyph('long')}长截图</button></div>
-      <div class="cap-actions"><button type="button" class="btn" data-cap="import">${glyph('image')}导入图片</button><button type="button" class="btn primary" data-cap="screen">${glyph('screen')}<span>截取屏幕</span></button></div></div>
+      <div class="cap-actions">${desktop?'<select aria-label="长截图滚动方式" class="cap-scroll-mode" hidden><option value="manual">手动滚动</option><option value="automatic">自动滚动</option></select>':''}<button type="button" class="btn" data-cap="import">${glyph('image')}导入图片</button><button type="button" class="btn primary" data-cap="screen">${glyph('screen')}<span>截取屏幕</span></button></div></div>
       <div class="cap-studio"><div class="cap-framehead"><div><span class="cap-led"></span><strong class="cap-title">滚动示例</strong><small class="cap-dim"></small></div><button type="button" class="cap-quiet" data-cap="sample">截取示例</button></div>
       <div class="cap-stage"><div class="cap-scroller" tabindex="0" aria-label="可滚动的截图画布"><div class="cap-canvasbox"></div></div></div>
       <div class="cap-footer"><span class="cap-status" role="status">滚动查看示例页面，截取当前可见范围。</span><button type="button" class="cap-quiet" data-cap="example" hidden>返回示例页面</button></div></div>
@@ -145,14 +149,14 @@
       if(!alive)return;
       const long=mode==='long', has=!!image;
       host.querySelectorAll('[data-cap-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.capMode===mode)));
-      $('[data-cap="screen"] span').textContent=long?'分段截屏':'截取屏幕';
+      $('[data-cap="screen"] span').textContent=long?(desktop?'截取长图':'分段截屏'):'截取屏幕';
       $('[data-cap="screen"]').disabled=!supported||busy;
       $('[data-cap="screen"]').title=supported?'授权选择要共享的窗口或屏幕':'此浏览器未提供屏幕共享，可使用示例或导入图片';
-      const demoButton=$('[data-cap="sample"]');demoButton.textContent=long?'截取示例长图':'截取示例';demoButton.hidden=has;
-      $('[data-cap="example"]').hidden=!has;$('.cap-edit').hidden=!has;
-      $('.cap-title').textContent=title||'滚动示例';
+      const demoButton=$('[data-cap="sample"]');demoButton.textContent=long?'截取示例长图':'截取示例';demoButton.hidden=has||!!desktop;
+      $('[data-cap="example"]').hidden=!has||!!desktop;$('.cap-edit').hidden=!has;
+      $('.cap-title').textContent=title||(desktop?'截图画布':'滚动示例');
       const shown=image||sample;
-      $('.cap-dim').textContent=shown.width+' × '+shown.height+' px';
+      $('.cap-dim').textContent=shown?shown.width+' × '+shown.height+' px':'';
       $('[data-cap="undo"]').disabled=!marks.length||busy;
       const saveButton=$('[data-cap="save"]');
       saveButton.disabled=busy||(marks.length?JSON.stringify(marks)===savedMarkKey:rawStored);
@@ -168,6 +172,14 @@
       if(!supported)$('.cap-note').textContent+=' 当前浏览器可使用示例或导入图片。';
       if(has) $('.cap-note').textContent+=' 页内置顶可跨工作台页面查看，跨应用置顶需要桌面版。';
       if(has&&!canChooseDirectory)$('.cap-note').textContent+=' 此浏览器请用下载，在下载设置选择保存位置。';
+      if(desktop){
+        $('.cap-scroll-mode').hidden=!long;
+        $('[data-cap="screen"]').title='隐藏词匣窗口，在屏幕上选择截取范围。';
+        $('[data-cap="pin"]').innerHTML=glyph('pin')+'屏幕置顶';
+        $('[data-cap="download"]').innerHTML=glyph('download')+'另存为';
+        directoryButton.hidden=true;
+        $('.cap-note').textContent=long?'选择滚动方式后截取长图。':'';
+      }
     }
     function updateStatus(s){if(alive)$('.cap-status').textContent=s;}
     function mount(page,editing) {
@@ -184,21 +196,28 @@
       if(dialog.open)dialog.close();
     }
     function showSample() {
+      if(desktop){
+        box.replaceChildren();refresh();
+        updateStatus('点「截取屏幕」框选范围，或导入需要标注的图片。');return;
+      }
       image=null;title='';marks.length=0;savedMarkKey='';rawStored=false;mount(sample,false);
       updateStatus(mode==='long'?'滚动查看整页。截取长图将包含示例页面的全部内容。':'滚动查看示例页面，截取当前可见范围。');
     }
     function viewportPixels(page) {
       return Math.max(1,Math.min(page.height,Math.round(scroller.clientHeight*page.width/(box.clientWidth||page.width))));
     }
-    async function receive(page,name,splitHeight) {
+    async function receive(page,name,splitHeight,archiveId='') {
       if(!alive)return;
       image=page;title=name;marks.length=0;savedMarkKey='';rawStored=false;tool='hand';
+      rawArchiveId=archiveId;markedArchiveId='';
       mount(page,true);frameHeight=Math.min(page.height,Math.max(1,splitHeight||viewportPixels(page)));
+      if(archiveId){rawStored=true;refresh();updateStatus('原图已加入剪贴板历史 · 可标注或导出');return;}
       updateStatus('正在写入剪贴板历史…');
       try {
         const blob=await png(page);
         if(typeof saveToClipboardHistory!=='function')throw new Error('历史存储不可用');
-        await saveToClipboardHistory({blob,title:name});
+        const saved=await saveToClipboardHistory({blob,title:name});
+        rawArchiveId=saved?.id||'';
         rawStored=true;
         if(alive){updateStatus('原图已加入剪贴板历史 · 可标注或导出');message('已加入剪贴板历史');}
       } catch(error){updateStatus('历史写入失败，原图仍可导出。');throw error;}
@@ -249,6 +268,10 @@
       }finally{URL.revokeObjectURL(url);}
     }
     async function openStream(){
+      if(desktop){
+        await desktop.request('capture.start',{long:mode==='long',automatic:mode==='long'&&$('.cap-scroll-mode').value==='automatic'});
+        return;
+      }
       destroySession();
       const sharing=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
       if(!alive){sharing.getTracks().forEach(t=>t.stop());return;}
@@ -296,6 +319,10 @@
       const merged=composited(),fileName='capture-'+stamp()+(format==='zip'?'-screens.zip':'.png');
       const blob=format==='zip'?await splitArchive(merged,Math.max(1,frameHeight)):await png(merged);
       if(!alive)return;
+      if(desktop){
+        await desktop.request('file.save',{filename:fileName,mime:blob.type,data:await desktop.encode(blob)});
+        return;
+      }
       if(directory){
         const file=await directory.getFileHandle(fileName,{create:true});
         const writer=await file.createWritable();try{await writer.write(blob);await writer.close();}catch(error){try{await writer.abort();}catch{}throw error;}
@@ -317,7 +344,7 @@
     async function click(e){
       const b=e.target.closest('button');
       if(!b||!pane.contains(b)||b.disabled||busy)return;
-      if(b.dataset.capMode){mode=b.dataset.capMode;refresh();if(!image)updateStatus(mode==='long'?'滚动查看整页。截取长图将包含示例页面的全部内容。':'滚动查看示例页面，截取当前可见范围。');return;}
+      if(b.dataset.capMode){mode=b.dataset.capMode;refresh();if(!image)updateStatus(desktop?'请选择截取范围。':mode==='long'?'滚动查看整页。截取长图将包含示例页面的全部内容。':'滚动查看示例页面，截取当前可见范围。');return;}
       if(b.dataset.capTool){tool=b.dataset.capTool;refresh();return;}
       if(b.dataset.capColor){color=b.dataset.capColor;refresh();return;}
       const act=b.dataset.cap;
@@ -330,11 +357,19 @@
         case 'undo':marks.pop();paint();refresh();break;
         case 'save':await run(act,async()=>{
           const signature=JSON.stringify(marks), blob=await png(composited());
-          await saveToClipboardHistory({blob,title:marks.length?title+' · 已标注':title});
-          if(!marks.length)rawStored=true;
+          const saved=await saveToClipboardHistory({blob,title:marks.length?title+' · 已标注':title});
+          if(!marks.length){rawStored=true;rawArchiveId=saved?.id||'';}
+          else markedArchiveId=saved?.id||'';
           savedMarkKey=signature;updateStatus(marks.length?'标注副本已加入历史':'原图已加入剪贴板历史');message('已存入剪贴板历史');
         });break;
-        case 'pin':await run(act,async()=>{const blob=await png(composited());if(alive)pinImage(blob,title);});break;
+        case 'pin':await run(act,async()=>{
+          const id=marks.length?(JSON.stringify(marks)===savedMarkKey?markedArchiveId:''):rawArchiveId;
+          if(desktop&&id){await desktop.request('capture.pin',{id,title});return;}
+          const blob=await png(composited());
+          if(!alive)return;
+          if(desktop)await desktop.request('capture.pin',{title,mime:blob.type,data:await desktop.encode(blob)});
+          else pinImage(blob,title);
+        });break;
         case 'download':case 'directory':await run(act,()=>exportImage(act==='directory'));break;
         case 'add-frame':await run(act,addFrame);break;
         case 'drop-frame':{const last=frames.pop();if(last){last.width=1;last.height=1;}updateFrames();break;}
@@ -347,6 +382,17 @@
     dialog.addEventListener('close',()=>{if(!dialog.open&&stream)destroySession();});
     scroller.addEventListener('keydown',e=>{if(image&&!busy&&marks.length&&(e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'){e.preventDefault();marks.pop();paint();refresh();}});
     showSample();
-    return ()=>{alive=false;destroySession();pane.removeEventListener('click',click);sample=null;image=null;outline=null;draft=null;marks.length=0;};
+    const unsubscribeCapture=desktop && onCaptureReady(async record=>{
+      const version=++captureVersion;
+      try{
+        if(!record.data&&!record.url)record=await desktop.request('history.detail',{id:record.id});
+        const pic=new Image();pic.src=desktop.mediaURL({...record,mime:record.mime||'image/png'});await pic.decode();
+        if(!alive||version!==captureVersion)return;
+        const page=surface(pic.naturalWidth,pic.naturalHeight);
+        page.getContext('2d').drawImage(pic,0,0);
+        await receive(page,record.title||'屏幕截图',record.frameHeight,record.id);
+      }catch(error){if(alive&&version===captureVersion)message('无法在画布打开系统截图。可在剪贴板历史另存原图。');}
+    });
+    return ()=>{alive=false;if(unsubscribeCapture)unsubscribeCapture();destroySession();pane.removeEventListener('click',click);sample=null;image=null;outline=null;draft=null;marks.length=0;};
   };
 })();

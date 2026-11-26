@@ -1,0 +1,17 @@
+.ds-body {background:var(--paper); color:var(--ink);}
+.ds-settings {width:min(600px,100%);padding:24px clamp(18px,5vw,32px);margin:0 auto;}
+.ds-header {display:flex;align-items:center;gap:11px;padding-bottom:18px;border-bottom:1px solid var(--line);}
+.ds-header h1 {font-size:24px;letter-spacing:-.04em}
+.ds-settings section {margin:21px 0;}
+.ds-settings h2 {font-size:16px;margin-bottom:6px;}
+.ds-settings p,.ds-switch small {font-size:12px;color:var(--muted);line-height:1.65;}
+.ds-switch,.ds-key {display:flex;align-items:center;gap:8px;}
+.ds-switch {justify-content:space-between;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);}
+.ds-settings strong {font-size:13px;}
+.ds-switch small {display:block;margin-top:3px;}
+.ds-switch input {accent-color:var(--ink);width:18px;height:18px;}
+.ds-key {padding:9px 0;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px;}
+.ds-key strong {flex:1;color:var(--ink);}
+.ds-key select {min-height:32px;max-width:48%;font-size:12px;padding:4px 6px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:5px;}
+.ds-actions {display:flex;justify-content:space-between;gap:8px;}
+#message {min-height:1.65em;margin-top:8px;}
