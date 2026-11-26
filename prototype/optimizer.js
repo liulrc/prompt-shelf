@@ -12,6 +12,9 @@ function createPromptOptimizer({desktop, icon, escape, copy, notify, edit}) {
   let configError = '';
   let loading = false;
 
+  function reportDraft() {
+    desktop?.setUpdateBusy?.('optimizer', running || !!(draft || results.length));
+  }
   function renderControls() {
     if (!view?.isConnected) return;
     const picker = view.querySelector('.ai-choices');
@@ -31,7 +34,10 @@ function createPromptOptimizer({desktop, icon, escape, copy, notify, edit}) {
     updateSubmit();
   }
   function updateSubmit() {
+    reportDraft();
     if (!view?.isConnected) return;
+    view.querySelector('#ai-clear-draft').hidden = !draft && !results.length;
+    view.querySelector('#ai-clear-draft').disabled = running;
     const button = view.querySelector('#ai-submit');
     button.disabled = !desktop || running || loading || !!configError || !settings.baseURL || !chosen.size || !draft.trim();
     button.textContent = running ? '优化中…' : '一键优化';
@@ -102,19 +108,24 @@ function createPromptOptimizer({desktop, icon, escape, copy, notify, edit}) {
     }
     renderControls();
     try { await Promise.all(Array.from({length:Math.min(3,results.length)},work)); }
-    finally { running = false; renderControls(); renderResults(); }
+    finally { running = false; reportDraft(); renderControls(); renderResults(); }
   }
 
   return function mount(host) {
     view = host;
     host.innerHTML = '<div class="page-intro"><div><h1>AI 优化提示词</h1><p>可输入任意语言的原文。优化后的提示词默认使用中文，并保留原文对任务输出语言的要求。</p></div></div>' +
-      '<section class="ai-compose"><label for="ai-input">原始提示词</label><textarea id="ai-input" placeholder="例如：帮我把这份项目周报整理成发给客户的进度邮件。"></textarea>' +
+      '<section class="ai-compose"><header class="compose-heading"><label for="ai-input">原始提示词</label><button type="button" id="ai-clear-draft" class="text-button" hidden>清空本次内容</button></header><textarea id="ai-input" placeholder="例如：帮我把这份项目周报整理成发给客户的进度邮件。"></textarea>' +
       '<div class="ai-options"><div class="ai-options-head"><h2>优化模型</h2>' +
-      (desktop ? '<button type="button" class="ai-config" data-act="settings">'+icon('keyboard',15)+'模型设置</button>' : '') +
+      (desktop ? '<button type="button" class="ai-config" data-act="settings" data-pane="models">'+icon('grid',15)+'模型设置</button>' : '') +
       '</div><div class="ai-choices"></div><p id="ai-target"></p></div><div class="ai-submit-row"><button type="button" id="ai-submit" class="btn gold">一键优化</button></div></section>' +
       '<section class="ai-results" hidden><h2 id="ai-results-title">优化结果</h2><div class="ai-result-list" aria-live="polite"></div></section>';
     const input = host.querySelector('#ai-input');
     input.value = draft;
+    host.querySelector('#ai-clear-draft').onclick = () => {
+      if (running) return;
+      draft = ''; sourceText = ''; results = []; input.value = '';
+      renderResults(); updateSubmit(); input.focus();
+    };
     input.oninput = () => {
       draft = input.value; updateSubmit();
       host.querySelector('#ai-results-title').textContent = sourceText === draft ? '优化结果' : '上一次优化结果';

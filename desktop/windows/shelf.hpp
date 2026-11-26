@@ -10,7 +10,17 @@ class NativeShelf {
     HFONT regular = nullptr, heading = nullptr, detail = nullptr;
     HBRUSH paper = nullptr, control = nullptr;
     int dpi = 96;
-    bool composing = false, closing = false;
+    bool composing = false, closing = false, highContrast = false;
+    COLORREF tone(COLORREF normal, int system) const { return highContrast ? GetSysColor(system) : normal; }
+    void colors() {
+        HIGHCONTRASTW value{sizeof(value)};
+        highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(value), &value, 0) &&
+                       (value.dwFlags & HCF_HIGHCONTRASTON);
+        if (paper) DeleteObject(paper);
+        if (control) DeleteObject(control);
+        paper = CreateSolidBrush(tone(RGB(244, 247, 246), COLOR_WINDOW));
+        control = CreateSolidBrush(tone(RGB(255, 255, 255), COLOR_WINDOW));
+    }
     std::vector<string> filtered;
     std::map<string, Frame> thumbs;
     std::function<void(const string &)> copy;
@@ -88,8 +98,8 @@ class NativeShelf {
                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
                                L"Segoe UI");
         };
-        regular = make(14, FW_MEDIUM);
-        heading = make(18, FW_SEMIBOLD);
+        regular = make(14, FW_NORMAL);
+        heading = make(20, FW_SEMIBOLD);
         detail = make(12, FW_NORMAL);
     }
     void layout() {
@@ -108,16 +118,18 @@ class NativeShelf {
         GetClientRect(window, &client);
         FillRect(dc, &client, paper);
         RECT header{px(18), px(5), client.right - px(56), px(45)};
-        textAt(dc, heading, RGB(42, 49, 40), L"剪贴板历史", header);
+        textAt(dc, heading, tone(RGB(25, 45, 43), COLOR_WINDOWTEXT), L"剪贴板历史", header);
+        RECT countRect{client.right - px(124), px(8), client.right - px(57), px(43)};
+        textAt(dc, detail, tone(RGB(86, 106, 102), COLOR_WINDOWTEXT), std::to_wstring(filtered.size()) + L" 条", countRect, DT_RIGHT);
         RECT close{client.right - px(43), px(6), client.right - px(12), px(40)};
-        textAt(dc, heading, RGB(88, 96, 84), L"×", close, DT_CENTER);
+        textAt(dc, heading, tone(RGB(86, 106, 102), COLOR_WINDOWTEXT), L"×", close, DT_CENTER);
         RECT search{px(16), px(49), client.right - px(16), px(85)};
-        fillRound(dc, search, px(9), RGB(197, 204, 189), RGB(255, 254, 250));
+        fillRound(dc, search, px(9), tone(RGB(181, 201, 195), COLOR_WINDOWTEXT), tone(RGB(255, 255, 255), COLOR_WINDOW));
         RECT footer{px(19), client.bottom - px(37), client.right - px(16), client.bottom - px(3)};
         const wstring note = !feedback.empty()  ? feedback
                              : filtered.empty() ? L"没有匹配的记录。"
                                                 : L"↑ ↓ 选择      Enter 复制      Esc 关闭";
-        textAt(dc, detail, RGB(88, 97, 82), note, footer);
+        textAt(dc, detail, tone(RGB(86, 106, 102), COLOR_WINDOWTEXT), note, footer);
         EndPaint(window, &ps);
     }
     void drawCard(const DRAWITEMSTRUCT &d) {
@@ -128,10 +140,10 @@ class NativeShelf {
         FillRect(d.hDC, &d.rcItem, paper);
         RECT card = d.rcItem;
         InflateRect(&card, -px(3), -px(3));
-        fillRound(d.hDC, card, px(11), selected ? RGB(179, 195, 159) : RGB(219, 224, 211),
-                  selected ? RGB(232, 239, 220) : RGB(255, 254, 250));
+        fillRound(d.hDC, card, px(11), selected ? tone(RGB(101, 153, 142), COLOR_HIGHLIGHTTEXT) : tone(RGB(213, 224, 221), COLOR_WINDOWTEXT),
+                  selected ? tone(RGB(222, 239, 234), COLOR_HIGHLIGHT) : tone(RGB(255, 255, 255), COLOR_WINDOW));
         RECT thumb{card.left + px(8), card.top + px(7), card.left + px(70), card.bottom - px(7)};
-        fillRound(d.hDC, thumb, px(7), RGB(218, 218, 205), RGB(237, 235, 224));
+        fillRound(d.hDC, thumb, px(7), tone(RGB(209, 226, 221), COLOR_WINDOWTEXT), tone(RGB(237, 245, 242), COLOR_WINDOW));
         auto id = filtered[d.itemID];
         if (!thumbs.count(id)) {
             if (thumbs.size() >= 18)
@@ -146,12 +158,12 @@ class NativeShelf {
                 x = (thumb.left + thumb.right - w) / 2, y = (thumb.top + thumb.bottom - h) / 2;
             drawFrame(d.hDC, f, {x, y, x + w, y + h}, {0, 0, f.w, f.h});
         } else
-            textAt(d.hDC, regular, RGB(103, 100, 79), r.at("type") == "text" ? L"Aa" : typeName(r), thumb,
+            textAt(d.hDC, regular, tone(RGB(23, 89, 81), COLOR_WINDOWTEXT), r.at("type") == "text" ? L"Aa" : typeName(r), thumb,
                    DT_CENTER);
         RECT title{thumb.right + px(12), card.top + px(6), card.right - px(12), card.top + px(33)};
-        textAt(d.hDC, regular, RGB(43, 50, 42), wide(r.value("title", "未命名内容")), title);
+        textAt(d.hDC, regular, tone(RGB(25, 45, 43), selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), wide(r.value("title", "未命名内容")), title);
         RECT meta{title.left, title.bottom, card.right - px(12), card.bottom - px(6)};
-        textAt(d.hDC, detail, RGB(91, 100, 83),
+        textAt(d.hDC, detail, tone(RGB(86, 106, 102), selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT),
                typeName(r) + L" · " + wide(r.value("source", "")) + L"  ·  " +
                    localTime(r.value("createdAt", "")),
                meta);
@@ -223,6 +235,11 @@ class NativeShelf {
             return DefWindowProcW(h, m, wp, lp);
         try {
             switch (m) {
+            case WM_SYSCOLORCHANGE:
+            case WM_SETTINGCHANGE:
+                s->colors();
+                RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+                break;
             case WM_PAINT:
                 s->paint();
                 return 0;
@@ -238,11 +255,11 @@ class NativeShelf {
                 ((MEASUREITEMSTRUCT *)lp)->itemHeight = s->px(70);
                 return TRUE;
             case WM_CTLCOLOREDIT:
-                SetBkColor((HDC)wp, RGB(255, 254, 250));
-                SetTextColor((HDC)wp, RGB(42, 49, 40));
+                SetBkColor((HDC)wp, s->tone(RGB(255, 255, 255), COLOR_WINDOW));
+                SetTextColor((HDC)wp, s->tone(RGB(25, 45, 43), COLOR_WINDOWTEXT));
                 return (LRESULT)s->control;
             case WM_CTLCOLORLISTBOX:
-                SetBkColor((HDC)wp, RGB(248, 248, 244));
+                SetBkColor((HDC)wp, s->tone(RGB(244, 247, 246), COLOR_WINDOW));
                 return (LRESULT)s->paper;
             case WM_COMMAND:
                 if (s->edit && (HWND)lp == s->edit && HIWORD(wp) == EN_CHANGE) {
@@ -307,8 +324,7 @@ class NativeShelf {
         RECT r = mi.rcWork;
         dpi = GetDpiForSystem();
         int w = std::min((int)(r.right - r.left), px(510)), h = std::min((int)(r.bottom - r.top), px(505));
-        paper = CreateSolidBrush(RGB(248, 248, 244));
-        control = CreateSolidBrush(RGB(255, 254, 250));
+        colors();
         window =
             CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CiXiaQuickShelf", L"剪贴板历史",
                             WS_POPUP | WS_BORDER, r.left + (r.right - r.left - w) / 2,

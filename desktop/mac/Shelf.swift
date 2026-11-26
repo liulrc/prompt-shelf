@@ -16,6 +16,15 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
   private let archive: Archive
   private let search = NSSearchField()
   private let table = CardsTable()
+  private let countLabel = NSTextField(labelWithString: "")
+  private let emptyLabel = NSTextField(wrappingLabelWithString: "")
+  private let isoDate = ISO8601DateFormatter()
+  private let rowDate: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.locale = .current
+    formatter.setLocalizedDateFormatFromTemplate("MMMd jm")
+    return formatter
+  }()
   private var rows = [Object]()
   var choose: ((String) -> Void)?
   var closePanel: (() -> Void)?
@@ -38,6 +47,13 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
     search.placeholderString = "搜索文字、文件名或来源"
     search.delegate = self
     search.sendsSearchStringImmediately = true
+    search.controlSize = .large
+    countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    countLabel.textColor = .secondaryLabelColor
+    emptyLabel.alignment = .center
+    emptyLabel.textColor = .secondaryLabelColor
+    emptyLabel.font = .systemFont(ofSize: 13)
+    emptyLabel.isHidden = true
     let scroll = NSScrollView()
     scroll.hasVerticalScroller = true
     scroll.autohidesScrollers = true
@@ -46,7 +62,7 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
     table.addTableColumn(column)
     table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
     table.headerView = nil
-    table.rowHeight = 52
+    table.rowHeight = 54
     table.intercellSpacing = NSSize(width: 0, height: 3)
     table.style = .inset
     table.selectionHighlightStyle = .regular
@@ -60,7 +76,9 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
     let hint = NSTextField(labelWithString: "↑ ↓  选择      ↩  复制到剪贴板      esc  关闭")
     hint.font = .systemFont(ofSize: 11)
     hint.textColor = .secondaryLabelColor
-    for view in [search, scroll, hint] as [NSView] {
+    scroll.drawsBackground = false
+    table.backgroundColor = .clear
+    for view in [search, scroll, hint, countLabel, emptyLabel] as [NSView] {
       view.translatesAutoresizingMaskIntoConstraints = false
       pane.addSubview(view)
     }
@@ -72,6 +90,11 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
       scroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 5),
       scroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -5),
       scroll.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -7),
+      countLabel.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -16),
+      countLabel.firstBaselineAnchor.constraint(equalTo: hint.firstBaselineAnchor),
+      emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+      emptyLabel.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 12),
+      emptyLabel.trailingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: -12),
       hint.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 17),
       hint.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -11),
     ])
@@ -102,7 +125,11 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
       let i = rows.firstIndex(where: { ($0["id"] as? String) == selected }) ?? 0
       table.selectRowIndexes(IndexSet(integer: i), byExtendingSelection: false)
     }
-    title = rows.isEmpty ? "剪贴板历史 · 没有匹配的记录" : "剪贴板历史"
+    countLabel.stringValue = "\(rows.count) 条"
+    emptyLabel.stringValue = words.isEmpty
+      ? "暂无记录。复制一段文字或截一张图后，可在这里找回。"
+      : "没有匹配的记录。试试正文、文件名或来源。"
+    emptyLabel.isHidden = !rows.isEmpty
   }
   func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
   func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
@@ -119,14 +146,16 @@ final class ShelfPanel: NSPanel, NSTableViewDataSource, NSTableViewDelegate, NSS
       ?? NSImage(
         systemSymbolName: type == "text" ? "text.alignleft" : type == "video" ? "film" : "photo",
         accessibilityDescription: nil)
+    if image == nil { pic.contentTintColor = .systemTeal }
     let name = NSTextField(
       labelWithString: (entry["title"] as? String ?? "").replacingOccurrences(of: "\n", with: " "))
-    name.font = .systemFont(ofSize: 13, weight: .medium)
+    name.font = .systemFont(ofSize: 13, weight: .semibold)
     name.lineBreakMode = .byTruncatingTail
     let meta = NSTextField(
       labelWithString: [
         type == "text" ? "文本" : type == "image" ? "图片" : "视频", entry["source"] as? String ?? "",
-      ].joined(separator: " · "))
+        (entry["createdAt"] as? String).flatMap { isoDate.date(from: $0) }.map(rowDate.string(from:)) ?? "",
+      ].filter { !$0.isEmpty }.joined(separator: " · "))
     meta.font = .systemFont(ofSize: 11)
     meta.textColor = .secondaryLabelColor
     for el in [pic, name, meta] as [NSView] {

@@ -1,0 +1,27 @@
+name: Windows desktop upgrade
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exercise native installer, rollback, relaunch and Settings
+        shell: pwsh
+        run: ./tests/windows/test-upgrade.ps1
+      - name: Exercise WinHTTP, Attachment Services, hash and file lock
+        shell: pwsh
+        run: |
+          $json = Join-Path $env:RUNNER_TEMP 'json.hpp'
+          Invoke-WebRequest 'https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp' -OutFile $json
+          if ((Get-FileHash $json -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6') { throw 'Unexpected JSON header' }
+          g++ -std=c++17 -Os -static "-I$env:RUNNER_TEMP" tests/windows/update-live.cpp -o "$env:RUNNER_TEMP/update-live.exe" -lwinhttp -lcrypt32 -lgdiplus -lole32 -lshell32 -luuid
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/update-live.exe"
+          exit $LASTEXITCODE

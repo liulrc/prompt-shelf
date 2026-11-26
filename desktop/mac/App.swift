@@ -10,6 +10,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   let archive: Archive
   let native: NativeServices
   let promptAI: PromptAI
+  let updates: MacUpdates
+  private var dirtyWindows = Set<String>()
+  private var settingsPane: String?
   let webRoot: URL
   var windows = [String: NSWindow](), views = [String: WKWebView]()
   var ready = Set<String>(), pendingArea: String?
@@ -27,6 +30,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   let smoke: Bool
   init(archive: Archive, webRoot: URL, smoke: Bool = false) {
     self.archive = archive
+    self.updates = MacUpdates(root: archive.root)
     self.webRoot = webRoot
     self.smoke = smoke
     promptAI = PromptAI(root: archive.root, keychainService: smoke
@@ -47,6 +51,16 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   }
   func applicationDidFinishLaunching(_ notification: Notification) {
     buildMenus()
+    updates.changed = { [weak self] state in
+      guard let self, ready.contains("settings"), let view = views["settings"] else { return }
+      send(view, ["event": "update.changed", "data": state])
+    }
+    updates.canRestart = { [weak self] background in
+      guard let self else { return false }
+      return await safeForUpdate(background: background)
+    }
+    updates.terminate = { NSApp.terminate(nil) }
+    if !smoke { updates.start() }
     if !smoke {
       DistributedNotificationCenter.default().addObserver(
         self, selector: #selector(reopenWorkspace), name: Self.reopenNotification, object: nil)
@@ -79,11 +93,17 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     NSWorkspace.shared.notificationCenter.addObserver(
       self, selector: #selector(activated(_:)),
       name: NSWorkspace.didActivateApplicationNotification, object: nil)
-    if !CommandLine.arguments.contains("--background") { showMain("personal") }
+    if !CommandLine.arguments.contains("--background") {
+      if CommandLine.arguments.contains("--update-rollback") {
+        settingsPane = "updates"
+        showWeb("settings")
+      } else { showMain("personal") }
+    }
     if !hotkeyIssue.isEmpty {
       showWeb("settings")
       report(hotkeyIssue)
     }
+    UpdateFiles.confirmLaunch(root: archive.root, arguments: CommandLine.arguments)
     if smoke {
       if CommandLine.arguments.contains("--background") {
         do {
@@ -132,6 +152,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
   func applicationWillTerminate(_ notification: Notification) {
     DistributedNotificationCenter.default().removeObserver(self)
+    updates.stop()
     native.shutdown()
     NSWorkspace.shared.notificationCenter.removeObserver(self)
   }
@@ -540,6 +561,8 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       DispatchQueue.main.async { [weak self] in self?.updateBackgroundPolicy() }
     }
     views.removeValue(forKey: name)
+    dirtyWindows.remove(name)
+    if name == "settings" { settingsPane = nil }
     ready.remove(name)
     if latestCaptureEditor == name { latestCaptureEditor = nil }
     if name == "main" {
@@ -559,9 +582,34 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
     guard let key = views.first(where: { $0.value === v })?.key else { return }
     ready.insert(key)
     if key == "main" { flushMain() }
+    if key == "settings" { flushSettingsPane() }
     if let image = pendingEditors.removeValue(forKey: key) {
       send(v, ["event": "capture.ready", "data": image])
     }
+  }
+  private func flushSettingsPane() {
+    guard let pane = settingsPane, ready.contains("settings"), let view = views["settings"] else { return }
+    settingsPane = nil
+    send(view, ["event": "route", "data": ["pane": pane]])
+  }
+  private func safeForUpdate(background: Bool) async -> Bool {
+    func busy() -> Bool {
+      !dirtyWindows.isEmpty || mainEditing || native.isCapturing || !native.pinnedWindows.isEmpty ||
+        NSApp.modalWindow != nil || shelf?.isVisible == true ||
+        windows.contains { key, window in
+          key.hasPrefix("editor-") || window.attachedSheet != nil ||
+            (background && (window.isVisible || window.isMiniaturized))
+        }
+    }
+    guard !busy() else { return false }
+    for key in ["main", "settings"] {
+      guard let view = views[key] else { continue }
+      guard ready.contains(key),
+        let safe = try? await view.callAsyncJavaScript(
+          "return window.promptShelfCanRestartForUpdate?.() === true", arguments: [:], in: nil, contentWorld: .page),
+        safe as? Bool == true else { return false }
+    }
+    return !busy()
   }
   func flushMain() {
     guard ready.contains("main"), let view = views["main"] else { return }
@@ -638,6 +686,27 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
         try mutateBackup(p)
         done(true)
       case "settings.get": done(settings())
+      case "update.activity":
+        guard let key = ["main", "settings"].first(where: { views[$0] === v }),
+              let dirty = p["dirty"] as? Bool else { throw AppIssue("窗口状态无效。") }
+        if dirty { dirtyWindows.insert(key) } else { dirtyWindows.remove(key) }
+        done(true)
+      case "update.openInstaller":
+        guard v === views["settings"] else { throw AppIssue("请在设置中管理软件更新。") }
+        Task {
+          do { try await updates.openInstaller(); done(updates.state) } catch { fail(error) }
+        }
+      case "update.get", "update.check", "update.apply", "update.preferences":
+        guard v === views["settings"] else { throw AppIssue("请在设置中管理软件更新。") }
+        switch command {
+        case "update.check": updates.check()
+        case "update.apply": updates.apply()
+        case "update.preferences":
+          guard let enabled = p["automatic"] as? Bool else { throw AppIssue("更新选项无效。") }
+          try updates.preferences(enabled)
+        default: break
+        }
+        done(updates.state)
       case "ai.settings.get", "ai.settings.set", "ai.models.list", "ai.optimize":
         let settingsWindow = v === views["settings"], mainWindow = v === views["main"]
         let allowed = command == "ai.optimize" ? mainWindow
@@ -754,7 +823,11 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScr
       case "window.open":
         let area = p["area"] as? String ?? "main"
         switch area {
-        case "settings", "gallery": showWeb(area)
+        case "settings":
+          if p["pane"] as? String == "models" { settingsPane = "models" }
+          showWeb(area)
+          flushSettingsPane()
+        case "gallery": showWeb(area)
         case "editor": try openArchivedImage(p["id"] as? String ?? "")
         case "shelf": toggleShelf()
         default: showMain(area == "main" ? "personal" : area)

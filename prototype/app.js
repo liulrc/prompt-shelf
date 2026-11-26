@@ -39,7 +39,7 @@
   const model = window.PromptModel;
   const store = model.createStore();
   const desktop = window.PromptDesktop?.active ? window.PromptDesktop : null;
-  let desktopSettings = {hotkeys:{shelf:'Alt+Q'}, monitoring:true};
+  let desktopSettings = {hotkeys:{capture:'Alt+A',shelf:'Alt+Q',pin:'Alt+Z',templates:'Alt+X'}, monitoring:true};
   const categories = {
     '研究':['research','research'], '视频':['video','video'], '文案':['pen','copy'],
     '开发':['code','dev'], '办公':['briefcase','office']
@@ -48,6 +48,7 @@
   const order = ['全部','视频','文案','研究','开发','办公'];
   const root = document.querySelector('#app');
   const state = {area:'builtin', category:'全部', query:'', editing:false};
+  const selections = new Map();
   let lastFocus = '', noticeTimer;
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
 
@@ -110,12 +111,12 @@
     try {
       if (desktop && area === 'capture') {
         await Promise.all([loadAsset('capture-home.js','desktop/ui'),loadAsset('capture-home.css','desktop/ui')]);
-        if (host.isConnected) disposeTool = window.mountCaptureHome({host,desktop,icon,notify});
+        if (host.isConnected) disposeTool = window.mountCaptureHome({host,desktop,icon,notify,hotkeys:desktopSettings.hotkeys,displayKey});
         return;
       }
       const [media] = await Promise.all([getArchive(), loadAsset(area+'.css'), loadAsset(area+'.js'), area === 'capture' && loadAsset('screens-zip.js')]);
       if (!host.isConnected) return;
-      const options = {host,icon,escape,notify,media,openShelf,desktop,shelfShortcut:shelfKeys(), monitoring:desktopSettings.monitoring,
+      const options = {host,icon,escape,notify,media,openShelf,desktop,shelfShortcut:displayKey(shelfKeys()), displayKey, monitoring:desktopSettings.monitoring,
         onHistory:() => navigate('clipboard'),
         saveToClipboardHistory:({blob,title}) => media.add({type:'image',blob,title,filename:title.replace(/\.png$/i,'')+'.png',source:'截图工具'})};
       const cleanup = await (area === 'clipboard' ? window.openClipboardTool(options) : window.openCaptureTool(options));
@@ -151,44 +152,57 @@
       active?.focus?.({preventScroll:true});
     }
   }
+  const displayKey = value => String(value || '').replace(/Alt\+|Ctrl\+|Shift\+/g, token => {
+    if (!/Mac|iPhone|iPad/.test(navigator.platform)) return token;
+    return {'Alt+':'⌥','Ctrl+':'⌃','Shift+':'⇧'}[token];
+  });
   function navButton(area, symbol, count) {
     const active = state.area === area;
-    return '<button class="nav-item' + (active ? ' active':'') + '" data-nav="' + area + '"' + (active ? ' aria-current="page"':'') + '>' + icon(symbol,17) + '<span>' + areaNames[area] + '</span>' + (count == null ? '' : '<span class="nav-count">' + count + '</span>') + '</button>';
+    return `<button class="nav-item${active ? ' active' : ''}" data-nav="${area}" title="${areaNames[area]}" ${active ? 'aria-current="page"' : ''}>${icon(symbol,17)}<span class="nav-name">${areaNames[area]}</span>${count == null ? '' : '<span class="nav-count">'+count+'</span>'}</button>`;
   }
   function layout() {
     if (typeof disposeTool === 'function') disposeTool();
     disposeTool = null;
+    const group = ['clipboard','capture'].includes(state.area) ? '桌面工具' : state.area === 'history' ? '活动记录' : '模板空间';
     root.innerHTML = `<div class="app-shell"><aside class="sidebar">
-      <div class="brand"><img src="prototype/mark.svg" alt=""><div><div class="brand-name">词匣</div><small>PROMPT SHELF</small></div></div>
+      <div class="brand"><img src="prototype/mark.svg" alt=""><div><div class="brand-name">词匣</div><small>Prompt Shelf</small></div></div>
       <nav aria-label="工作台导航"><p class="nav-group">模板空间</p>
         ${navButton('optimize','spark',null)}${navButton('personal','folder',store.listPersonal().length)}${navButton('builtin','library',catalog.length)}
         <p class="nav-group next">活动记录</p>${navButton('history','history',null)}
         <p class="nav-group next">桌面工具</p>${navButton('clipboard','clipboard',null)}${navButton('capture','capture',null)}
-      ${desktop ? '<button class="nav-item" data-act="settings">'+icon('keyboard',17)+'<span>设置</span></button>' : ''}</nav><button class="side-shelf" data-act="open-shelf" title="打开快捷历史栏">${icon('keyboard',16)} 历史栏 <kbd>${escape(shelfKeys())}</kbd></button><div class="side-foot"><span class="device">${icon('box',19)}</span><div><strong>本地工作区</strong><small>${store.persistent ? '离线可用' : '仅在本次会话中保留'}</small></div></div>
+      </nav><div class="rail-foot"><button class="side-shelf" data-act="open-shelf" title="打开快捷历史栏">${icon('keyboard',17)}<span>快捷历史栏</span><kbd>${escape(displayKey(shelfKeys()))}</kbd></button>
+      ${desktop ? '<button class="side-settings" data-act="settings" title="设置">'+icon('grid',17)+'<span>设置</span></button>' : ''}
+      ${store.persistent ? '' : '<small class="volatile">本次会话结束后数据可能丢失</small>'}</div>
       </aside><div class="workspace"><header class="topbar">
-        <div class="crumbs"><span class="crumb-home">工作台</span>${icon('chevron',11)}<b>${areaNames[state.area]}</b>${state.editing ? icon('chevron',11)+'<b>编辑器</b>':''}</div>
-         ${state.editing || !hasLibrarySearch(state.area) ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',15)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索当前模板库'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
+        <div class="crumbs"><span class="crumb-home">${group}</span>${icon('chevron',11)}<b>${areaNames[state.area]}</b>${state.editing ? icon('chevron',11)+'<b>编辑原文</b>':''}</div>
+        ${state.editing || !hasLibrarySearch(state.area) ? '' : `<div class="top-actions"><label class="searchbox">${icon('search',16)}<input type="search" id="search" aria-label="搜索当前${state.area === 'history' ? '历史':'模板库'}" placeholder="${state.area === 'history' ? '搜索使用历史':'搜索模板名称、正文'}" value="${escape(state.query)}"><kbd>${shortcut}</kbd></label><button class="btn primary" data-act="new">${icon('plus',15)}新建模板</button></div>`}
       </header><main id="content" class="content"></main></div></div>`;
   }
   function categoryIcon(category) {
     const [symbol, style] = Object.hasOwn(categories, category) ? categories[category] : ['brackets','other'];
     return '<span class="cat-icon cat-' + style + '">' + icon(symbol,16) + '</span>';
   }
-  function card(record) {
-    const count = model.parse(record.body).filter(segment => segment.type === 'slot').length;
-    return `<button class="card" data-open="${escape(record.id)}"><span class="card-top"><span class="category-tag">${categoryIcon(record.category)}${escape(record.category)}</span><span class="card-open">${icon('arrow',15)}</span></span>
-      <h3>${escape(record.title)}</h3><p>${escape(record.description || model.render(record.body))}</p><span class="card-meta">${icon(count ? 'brackets':'text',13)}${count ? count + ' 个变量':'固定短语'}</span></button>`;
+  function templateRow(record, selected) {
+    const id = escape(record.id), title = escape(record.title), category = escape(record.category);
+    return `<div class="template-row${selected ? ' selected':''}"><button type="button" data-select="${id}" aria-pressed="${selected}" class="template-select">
+      ${categoryIcon(record.category)}<span class="row-text"><strong>${title}</strong><small>${category}</small></span></button>
+      <button type="button" class="card row-edit" data-open="${id}" aria-label="编辑 ${title}" title="编辑原文">${icon('edit',15)}</button></div>`;
+  }
+  function templatePreview(record) {
+    const parts = model.parse(record.body), count = parts.filter(part=>part.type === 'slot').length;
+    const text = parts.map(part=>part.type === 'slot' ? '<mark>'+escape(part.defaultValue)+'</mark>' : escape(part.text)).join('');
+    return `<div class="preview-label">${icon('eye',15)}使用预览</div>
+      <div class="inspector-body"><div class="inspector-category">${categoryIcon(record.category)}${escape(record.category)}</div><h2>${escape(record.title)}</h2>
+      ${record.description ? '<p class="inspector-description">'+escape(record.description)+'</p>':''}
+      <div class="prompt-sheet"><div class="sheet-head"><span>提示词正文</span>${count ? '<small>含 '+count+' 处可改内容</small>' : ''}</div><div class="sheet-text">${text}</div></div>
+      ${record.source?.name ? '<p class="inspector-credit">'+icon('link',13)+escape(record.source.name)+'</p>' : ''}</div>
+      <div class="inspector-actions"><button class="btn" data-open="${escape(record.id)}">${icon('edit',15)}编辑原文</button><button class="btn primary" data-copy-template="${escape(record.id)}">${icon('copy',15)}直接使用</button></div>`;
   }
   function empty(symbol,title,desc,action,label) {
     return `<div class="empty"><span class="empty-icon">${icon(symbol,22)}</span><strong>${title}</strong><p>${desc}</p>${action ? '<button class="btn" data-act="'+action+'">'+label+'</button>':''}</div>`;
   }
   function intro(title,description,quantity='') {
     return '<div class="page-intro"><div><h1 tabindex="-1">'+title+'</h1><p>'+description+'</p></div>'+quantity+'</div>';
-  }
-  function feature() {
-    const pick = catalog.find(t => t.id === 'project-reader');
-    return `<section class="feature" aria-label="精选模板"><div class="feature-copy"><div class="feature-tag">${icon('spark',14)} 精选模板</div><h2>${escape(pick.title)}</h2>
-      <p class="feature-example">详细阅读并<span>【学习/部署】</span><span>【GitHub】</span>上的<span>【项目地址】</span>项目。</p><button class="hero-button" data-open="project-reader">打开模板 ${icon('arrow',14)}</button></div><img class="feature-art" src="prototype/feature.svg" alt=""></section>`;
   }
   const normalize = text => String(text).toLocaleLowerCase().trim();
   function matches(record, keys) {
@@ -200,14 +214,28 @@
     const userCategories = Array.from(new Set(records.map(t=>t.category)));
     const choices = builtin ? order : ['全部',...userCategories.filter(c=>c !== '全部')];
     const list = records.filter(t=>(state.category === '全部' || t.category === state.category) && matches(t,['title','body','category','description']));
-    const showFeature = builtin && state.category === '全部' && !state.query.trim();
-    const shown = showFeature ? [...list.filter(t=>t.id !== 'project-reader'), ...list.filter(t=>t.id === 'project-reader')] : list;
+    const selected = list.find(item=>item.id === selections.get(state.area)) || list[0];
+    if (selected) selections.set(state.area,selected.id);
     const title = builtin ? '附加库' : '我的模板';
-    const desc = builtin ? '按用途挑选提示词，直接改写原文后即可使用。' : '保存自己的固定短语，以及从附加库改写的模板。';
-    host.innerHTML = intro(title,desc,'<span class="intro-quantity"><b>'+records.length+'</b> 个模板 · <b>'+userCategories.length+'</b> 种用途</span>') + (showFeature ? feature():'') +
-      `<div class="library-head"><div class="section-title"><h2>${state.query.trim() ? '搜索结果' : '浏览模板'}</h2><span class="count-pill">${shown.length}</span></div>
-      <div class="filters" role="group" aria-label="按用途筛选">${choices.map(c=>'<button class="filter-btn'+(state.category === c ? ' active':'')+'" data-filter="'+escape(c)+'" aria-pressed="'+(state.category===c)+'">'+(c==='全部'?icon('grid',12):'')+escape(c)+'</button>').join('')}</div></div>` +
-      (shown.length ? '<div class="card-grid">'+shown.map(card).join('')+'</div>' : (records.length ? empty('search','没有找到匹配的模板','可换一个关键词，或查看全部用途。','reset','清除筛选') : empty('folder','还没有个人模板','从空白开始，也可以在附加库打开一条模板，然后点「保存」。','new','新建模板')));
+    const desc = builtin ? '按用途查找提示词，使用前可以改写并存入我的模板。' : '在这里整理和复用自己保存的提示词。';
+    host.innerHTML = intro(title,desc) +
+      `<div class="library-head"><div class="filters" role="group" aria-label="按用途筛选">${choices.map(c=>'<button class="filter-btn'+(state.category === c ? ' active':'')+'" data-filter="'+escape(c)+'" aria-pressed="'+(state.category===c)+'">'+(c==='全部'?icon('grid',13):'')+escape(c)+'</button>').join('')}</div></div>` +
+      (selected ? '<div class="catalog-workbench"><section class="catalog-master" aria-label="模板列表"><div class="catalog-head">'+(state.query.trim() ? '搜索结果':'模板列表')+'<span>'+list.length+'</span></div><div class="catalog-list">'+list.map(record=>templateRow(record,record.id===selected.id)).join('')+'</div></section><section class="catalog-inspector" aria-label="所选模板">'+templatePreview(selected)+'</section></div>' :
+        records.length ? empty('search','没有找到匹配的模板','换个关键词，或清除当前筛选。','reset','清除筛选') : empty('folder','还没有个人模板','从空白开始，或将附加库中的模板改写后保存到这里。','new','新建模板'));
+  }
+
+  function selectedRecord(id) {
+    const source = state.area === 'builtin' ? catalog : store.listPersonal();
+    return source.find(item=>item.id === id);
+  }
+  function selectTemplate(button) {
+    const record = selectedRecord(button.dataset.select);
+    if (!record) return;
+    const old = root.querySelector('.template-select[aria-pressed=true]');
+    old?.setAttribute('aria-pressed','false'); old?.parentElement.classList.remove('selected');
+    button.setAttribute('aria-pressed','true'); button.parentElement.classList.add('selected');
+    selections.set(state.area,record.id);
+    root.querySelector('.catalog-inspector').innerHTML = templatePreview(record);
   }
   function listHistory(host) {
     const history = store.listHistory();
@@ -224,6 +252,7 @@
     if (state.area === 'history') listHistory(host); else listTemplates(host);
   }
   function navigate(area, reset=true) {
+    desktop?.setUpdateBusy?.('editor',false);
     Object.assign(state,{area,editing:false});
     if (reset) Object.assign(state,{query:'',category:'全部'});
     try { history.replaceState(null, '', '#' + area); } catch { /* Some local WebViews restrict history writes. */ }
@@ -238,14 +267,16 @@
     previousScroll=window.scrollY;
     lastFocus=trigger?.dataset.open || '';
     state.editing=true;
+    desktop?.setUpdateBusy?.('editor',true);
     notifyRoute();
     layout();
     window.scrollTo(0,0);
     document.title='编辑器 · 词匣';
     const returnToList = () => {
       navigate(state.area,false); window.scrollTo(0,previousScroll);
-      const buttons = Array.from(document.querySelectorAll('[data-open]'));
-      (buttons.find(el=>el.dataset.open === lastFocus) || document.querySelector('[data-act="new"]'))?.focus({preventScroll:true});
+      const previous = Array.from(root.querySelectorAll('[data-select]')).find(el => el.dataset.select === lastFocus);
+      previous?.scrollIntoView({block:'nearest'});
+      (previous || root.querySelector('[data-act="new"]'))?.focus({preventScroll:true});
     };
     window.openPromptEditor({host:document.querySelector('#content'),record,origin,store,notify,copy:trackPromptCopy,icon,escape,
       backLabel:state.area === 'optimize' ? '返回优化结果' : '返回列表', onCancel:returnToList,
@@ -264,15 +295,30 @@
     const {nav,filter,open,act,recopy}=button.dataset;
     if (nav) return navigate(nav);
     if (act === 'settings' && desktop) {
-      try { await desktop.request('window.open', {area:'settings'}); } catch (error) { notify(error.message); }
+      try { await desktop.request('window.open', {area:'settings', pane:button.dataset.pane || 'general'}); } catch (error) { notify(error.message); }
       return;
     }
     if (act === 'open-shelf') return openShelf();
     if (filter !== undefined) { state.category=filter; drawContent(); Array.from(root.querySelectorAll('[data-filter]')).find(el=>el.dataset.filter===filter)?.focus({preventScroll:true}); return; }
+    if (button.dataset.select) { selectTemplate(button); return; }
+    if (button.dataset.copyTemplate) {
+      const origin = state.area, record = selectedRecord(button.dataset.copyTemplate);
+      if (!record) return;
+      const text = model.render(record.body);
+      button.disabled = true;
+      try {
+        await trackPromptCopy(text);
+        try { store.recordUse({title:record.title,category:record.category,text,templateId:record.id,origin}); }
+        catch { notify('已复制到剪贴板，历史记录写入失败'); return; }
+        notify('已复制到剪贴板，可在使用历史中查看');
+      } catch (error) { notify(error.message); }
+      finally { button.disabled = false; }
+      return;
+    }
     if (open) {
       const origin=state.area;
       const record=(origin === 'builtin'?catalog:store.listPersonal()).find(t=>t.id===open);
-      if (record) openEditor(record,origin,button);
+      if (record) { selections.set(origin,record.id); openEditor(record,origin,button); }
       return;
     }
     if (act === 'new') return openEditor({title:'',body:'',category:'未分类'},'new',button);
@@ -290,6 +336,11 @@
     }
   });
   window.addEventListener('keydown',event=>{
+    if (event.target.matches?.('.template-select') && ['ArrowDown','ArrowUp','Home','End'].includes(event.key)) {
+      const rows = Array.from(root.querySelectorAll('.template-select')), i = rows.indexOf(event.target);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, i + (event.key === 'ArrowUp' ? -1 : 1)));
+      event.preventDefault(); selectTemplate(rows[next]); rows[next].focus(); return;
+    }
     if (!desktop && event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.code === 'KeyV' || event.key.toLowerCase() === 'v')) {
       event.preventDefault();
       if (!event.repeat) openShelf();
@@ -311,7 +362,7 @@
       if (!value?.hotkeys) return;
       desktopSettings = value;
       const key = root.querySelector('[data-act="open-shelf"] kbd');
-      if (key) key.textContent = shelfKeys();
+      if (key) key.textContent = displayKey(shelfKeys());
     }
     desktop.request('settings.get').then(refreshSettings).catch(error => notify(error.message));
     desktop.on('settings.changed', refreshSettings);

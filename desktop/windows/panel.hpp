@@ -262,7 +262,8 @@ class Panel : public std::enable_shared_from_this<Panel> {
                                         LPWSTR address = nullptr, body = nullptr;
                                         if (FAILED(args->get_Source(&address)))
                                             return S_OK;
-                                        bool ok = trustedPage(address);
+                                        wstring source(address);
+                                        bool ok = source.substr(0, source.find_first_of(L"?#")) == p->url;
                                         CoTaskMemFree(address);
                                         if (ok && SUCCEEDED(args->get_WebMessageAsJson(&body))) {
                                             wstring w(body);
@@ -312,6 +313,8 @@ class Panel : public std::enable_shared_from_this<Panel> {
           std::function<void(Panel &, const Json &)> bridge, std::function<void(HWND)> close)
         : resolveMedia(std::move(resolver)), distribution(ui), userData(data / L"WebView"),
           mediaPath(media), dispatch(std::move(bridge)), closed(std::move(close)), kind(std::move(name)) {}
+    bool updateDirty = false, reportedActivity = false;
+    bool activityReady() const { return (kind != "main" && kind != "settings") || reportedActivity; }
     bool visible() const {
         return hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd);
     }

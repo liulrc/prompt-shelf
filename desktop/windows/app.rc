@@ -3,8 +3,8 @@
 1 ICON "CiXia.ico"
 1 24 "app.manifest"
 1 VERSIONINFO
-FILEVERSION 1,3,0,0
-PRODUCTVERSION 1,3,0,0
+FILEVERSION 1,4,0,0
+PRODUCTVERSION 1,4,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -14,8 +14,8 @@ BEGIN
         BEGIN
             VALUE "ProductName", "词匣\0"
             VALUE "FileDescription", "词匣 · 提示词与剪贴板\0"
-            VALUE "FileVersion", "1.3.0\0"
-            VALUE "ProductVersion", "1.3.0\0"
+            VALUE "FileVersion", "1.4.0\0"
+            VALUE "ProductVersion", "1.4.0\0"
             VALUE "OriginalFilename", "CiXia.exe\0"
         END
     END

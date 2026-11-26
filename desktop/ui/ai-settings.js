@@ -23,6 +23,9 @@
     return {};
   }
   function updateControls() {
+    const modelsChanged = selected.size !== saved.models.length || saved.models.some(model => !selected.has(model));
+    desktop.setUpdateBusy('modelSettings', saving || (!loading &&
+      (address(base.value) !== address(saved.baseURL) || !!key.value || clear.checked || modelsChanged)));
     const disabled = saving || loading;
     base.disabled = key.disabled = clear.disabled = query.disabled = disabled;
     fetchButton.disabled = disabled || fetching || !base.value.trim();
@@ -132,9 +135,16 @@
     } catch (error) { feedback.textContent = error.message || '模型配置未保存。'; }
     finally { saving = false; draw(); }
   };
-  draw();
-  desktop.request('ai.settings.get').then(value=>{
+  let initialized = false;
+  function initialize() {
+    if (initialized) return;
+    initialized = true;
+    draw();
+    desktop.request('ai.settings.get').then(value=>{
     loading = false; useSaved(value);
     if (base.value) fetchModels();
-  }).catch(error=>{ feedback.textContent = error.message || '读取模型配置失败。'; });
+    }).catch(error=>{ initialized = false; feedback.textContent = error.message || '读取模型配置失败。'; });
+  }
+  window.addEventListener('settings-pane', event => { if (event.detail === 'models') initialize(); });
+  if (!document.querySelector('#pane-models').hidden) initialize();
 })();

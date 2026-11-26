@@ -252,6 +252,13 @@ extension DesktopApp {
         showWeb("settings")
         try await waitFor { self.ready.contains("settings") }
         guard let sets = views["settings"] else { throw AppIssue("设置窗口缺失") }
+        let update = try await js(sets, "return await PromptDesktop.request('update.get')") as? Object
+        let denied = try await js(v, "try { await PromptDesktop.request('update.check'); return false } catch { return true }")
+        guard update?["current"] as? String == Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              update?["automatic"] as? Bool == false, denied as? Bool == true else {
+          throw AppIssue("设置更新入口、默认设置或窗口隔离检查失败")
+        }
+        print("PASS native updater settings readback and window boundary")
         if let port = ProcessInfo.processInfo.environment["PS_SMOKE_AI_PORT"].flatMap(UInt16.init) {
           try await checkProviderBridge(port: port, main: v, settingsView: sets)
         }

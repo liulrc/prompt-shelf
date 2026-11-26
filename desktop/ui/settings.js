@@ -1,6 +1,27 @@
 (() => {
   'use strict';
   const desktop = window.PromptDesktop;
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  function selectPane(tab) {
+    if (!tab) return;
+    for (const item of tabs) {
+      const active = item === tab;
+      item.setAttribute('aria-selected', String(active));
+      item.tabIndex = active ? 0 : -1;
+      document.getElementById(item.getAttribute('aria-controls')).hidden = !active;
+    }
+    document.querySelector('.ds-content').scrollTop = 0;
+    window.dispatchEvent(new CustomEvent('settings-pane', {detail:tab.id.slice(4)}));
+  }
+  for (const [i,tab] of tabs.entries()) {
+    tab.onclick = () => selectPane(tab);
+    tab.onkeydown = event => {
+      const next = {ArrowRight:(i+1)%tabs.length, ArrowLeft:(i+tabs.length-1)%tabs.length, Home:0, End:tabs.length-1}[event.key];
+      if (next === undefined) return;
+      event.preventDefault(); selectPane(tabs[next]); tabs[next].focus();
+    };
+  }
+  desktop.on('route', value => { if (value?.pane) selectPane(tabs.find(tab => tab.id === 'tab-' + value.pane)); });
   const form = document.querySelector('#settings');
   const monitoring = document.querySelector('#monitoring');
   const trayIcon = document.querySelector('#show-tray-icon');
@@ -16,6 +37,13 @@
   let loaded = false;
   let saving = false;
   const controls = new Map();
+  let baseline;
+  function snapshot() {
+    return JSON.stringify([monitoring.checked, trayIcon.checked, ...[...controls.values()].map(({mod,key}) => [mod.value,key.value])]);
+  }
+  function updateBusy() {
+    desktop.setUpdateBusy('generalSettings', saving || (loaded && snapshot() !== baseline));
+  }
   const isMac = /mac/i.test(navigator.platform);
   if (!isMac) document.querySelector('#tray-label').textContent = '显示系统托盘图标';
   document.querySelector('#quit').onclick = () => desktop.request('app.quit').catch(error => { message.textContent = error.message; });
@@ -54,10 +82,15 @@
   function setEnabled(value) {
     for (const control of form.elements) control.disabled = !value;
   }
-  document.querySelector('#defaults').onclick = () => { applyHotkeys({}); message.textContent = '已填入默认快捷键，保存后生效。'; };
-  form.onchange = () => { message.textContent = ''; };
+  document.querySelector('#defaults').onclick = () => { applyHotkeys({}); updateBusy(); message.textContent = '已填入默认快捷键，保存后生效。'; };
+  form.onchange = () => { updateBusy(); message.textContent = ''; };
   desktop.on('settings.changed', value => {
-    if (typeof value?.monitoring === 'boolean') monitoring.checked = value.monitoring;
+    if (typeof value?.monitoring === 'boolean') {
+      const clean = snapshot() === baseline;
+      monitoring.checked = value.monitoring;
+      if (clean) baseline = snapshot();
+      updateBusy();
+    }
   });
   form.onsubmit = async event => {
     event.preventDefault();
@@ -66,12 +99,13 @@
     if (new Set(Object.values(hotkeys)).size !== actions.length) {
       message.textContent = '有两项使用同一快捷键，请选择不同组合。'; return;
     }
-    saving = true; setEnabled(false); message.textContent = '正在应用…';
+    saving = true; updateBusy(); setEnabled(false); message.textContent = '正在应用…';
     try {
       const value = await desktop.request('settings.set', {hotkeys, monitoring:monitoring.checked, showTrayIcon:trayIcon.checked});
+      baseline = snapshot();
       message.textContent = '设置已保存。' + (value?.hotkeyIssue || '');
     } catch (error) { message.textContent = error.message || '设置未保存，请重试。'; }
-    finally { saving = false; setEnabled(true); save.focus(); }
+    finally { saving = false; updateBusy(); setEnabled(true); save.focus(); }
   };
   async function load() {
     setEnabled(false); applyHotkeys({});
@@ -80,7 +114,7 @@
       applyHotkeys(value.hotkeys || {}); monitoring.checked = !!value.monitoring;
       trayIcon.checked = value.showTrayIcon !== false;
       if (value.hotkeyIssue) message.textContent = String(value.hotkeyIssue);
-      loaded = true; setEnabled(true);
+      baseline = snapshot(); loaded = true; updateBusy(); setEnabled(true);
     } catch (error) { message.textContent = error.message; }
   }
   load();

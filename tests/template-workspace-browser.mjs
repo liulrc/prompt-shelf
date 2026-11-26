@@ -38,6 +38,16 @@ export async function exerciseWorkspace(page) {
   try {
     await page.goto('about:blank'); await page.goto(main+'#builtin'); await page.waitForSelector('[data-nav="optimize"]');
     assert.deepEqual(await page.evaluate(()=>[...document.querySelectorAll('[data-nav]')].slice(0,3).map(x=>x.dataset.nav)),['optimize','personal','builtin']);
+    await page.focus('[data-select="project-reader"]');
+    await page.press('[data-select="project-reader"]','ArrowDown');
+    assert.equal(await page.evaluate(()=>document.querySelector('.template-select[aria-pressed=true]').dataset.select),'deepen-question');
+    await page.fill('#search','具体方法、工具');
+    assert.equal(await page.evaluate(()=>document.querySelector('.catalog-inspector h2').textContent),'把问题问得更深');
+    await page.click('[data-copy-template="deepen-question"]');
+    assert.ok(await page.evaluate(()=>window.calls.some(v=>v.command==='clipboard.write' && v.payload.text.includes('图书馆') && !v.payload.text.includes('【例：'))));
+    await page.click('[data-nav=history]');
+    assert.ok(await page.evaluate(()=>document.querySelector('.history-text').textContent.includes('图书馆')));
+    await page.click('[data-nav=builtin]');
     await page.click('.card[data-open="project-reader"]');
     await page.fill('#pe-raw','前段\n\n尾段');
     await page.fill('.pe-reuse-search input','测试拼接段');
@@ -80,7 +90,12 @@ export async function exerciseWorkspace(page) {
     assert.deepEqual(runs.map(v=>v.model),['good','fails','good']);
     assert.ok(runs.every(v=>v.text===englishInput));
 
-    await page.goto(settings); await page.waitForSelector('#ai-model-list input[value=good]');
+    await page.click('[data-pane=models]');
+    assert.deepEqual(await page.evaluate(()=>window.calls.findLast(v=>v.command==='window.open').payload),{area:'settings',pane:'models'});
+    await page.click('#ai-clear-draft');
+    assert.equal(await page.evaluate(()=>document.querySelector('#ai-input').value),'');
+    assert.ok(await page.evaluate(()=>document.querySelector('.ai-results').hidden));
+    await page.goto(settings); await page.click('#tab-models'); await page.waitForSelector('#ai-model-list input[value=good]');
     assert.equal(await page.evaluate(()=>document.querySelector('#ai-key').value),'');
     assert.deepEqual(await page.evaluate(()=>window.calls.find(v=>v.command==='ai.models.list').payload),{baseURL:'https://example.test/v1'});
     await page.fill('#ai-base','https://second.example.test/v1');

@@ -76,7 +76,7 @@ struct Config {
 };
 using Internet = std::unique_ptr<void, decltype(&WinHttpCloseHandle)>;
 inline Json fetch(const Endpoint &endpoint, const string &key, const string &suffix, const string &body) {
-    Internet session(WinHttpOpen(L"CiXia/1.3", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+    Internet session(WinHttpOpen(L"CiXia/1.4", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                  WINHTTP_NO_PROXY_BYPASS, 0),
                      WinHttpCloseHandle);
     check(bool(session), "无法启动网络请求。");

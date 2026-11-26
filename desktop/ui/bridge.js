@@ -50,6 +50,19 @@
     }
     return () => listeners.get(event)?.delete(handler);
   }
+  const updateHolds = new Set();
+  let reportedBusy;
+  function setUpdateBusy(reason, busy) {
+    if (busy) updateHolds.add(reason); else updateHolds.delete(reason);
+    const dirty = updateHolds.size > 0;
+    if (!active || dirty === reportedBusy) return;
+    reportedBusy = dirty;
+    request('update.activity', {dirty}).catch(() => { reportedBusy = undefined; });
+  }
+  if (/(?:^|\/)(?:index|settings)\.html$/.test(location.pathname)) {
+    window.addEventListener('DOMContentLoaded', () => setUpdateBusy('initializing', false), {once:true});
+  }
+  window.promptShelfCanRestartForUpdate = () => document.readyState !== 'loading' && !updateHolds.size;
   function encode(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -90,5 +103,5 @@
     };
   }
   if (win?.addEventListener) win.addEventListener('message', event => receive(event.data));
-  window.PromptDesktop = {active, request, receive, on, encode, mediaURL, archive};
+  window.PromptDesktop = {active, request, receive, on, encode, mediaURL, archive, setUpdateBusy};
 })();

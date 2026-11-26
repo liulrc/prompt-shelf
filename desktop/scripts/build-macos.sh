@@ -15,6 +15,7 @@ cp -R "$root/prototype" "$web/"
 cp -R "$root/desktop/ui" "$web/desktop/"
 cp "$root/desktop/mac/Info.plist" "$app/Contents/Info.plist"
 cp "$root/desktop/mac/AppIcon.icns" "$app/Contents/Resources/"
+version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
 for cpu in arm64 x86_64; do
     case "$cpu" in arm64) rust_target=macos-arm64 ;; *) rust_target=macos-x64 ;; esac
     object=$("$root/desktop/scripts/build-core.sh" "$rust_target")
@@ -25,6 +26,6 @@ lipo -create "$build/PromptShelf-arm64" "$build/PromptShelf-x86_64" -output "$ex
 codesign --force --sign "${MAC_SIGN_IDENTITY:--}" "$app"
 codesign --verify --strict --deep "$app"
 ln -s /Applications "$stage/Applications"
-hdiutil create -quiet -ov -fs HFS+ -format UDZO -volname "词匣" -srcfolder "$stage" "$dist/PromptShelf-1.3.0-macOS-universal.dmg"
-hdiutil verify "$dist/PromptShelf-1.3.0-macOS-universal.dmg" >/dev/null
-echo "$dist/PromptShelf-1.3.0-macOS-universal.dmg"
+hdiutil create -quiet -ov -fs HFS+ -format UDZO -volname "词匣" -srcfolder "$stage" "$dist/PromptShelf-${version}-macOS-universal.dmg"
+hdiutil verify "$dist/PromptShelf-${version}-macOS-universal.dmg" >/dev/null
+echo "$dist/PromptShelf-${version}-macOS-universal.dmg"

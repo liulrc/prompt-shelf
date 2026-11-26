@@ -2,6 +2,7 @@
 #include "ai.hpp"
 #include "panel.hpp"
 #include "shelf.hpp"
+#include "updater.hpp"
 #include <set>
 #include <sstream>
 #include <cwctype>
@@ -75,6 +76,7 @@ class Application {
     using Chord = std::pair<UINT, UINT>;
     fs::path home = localDir(), resources = exeDir() / L"www";
     Archive archive{home};
+    updater::Manager updates{home};
     fs::path aiSettingsFile = home / L"ai-settings.json";
     std::shared_ptr<AiMailbox> aiMail = std::make_shared<AiMailbox>();
     Capture capture;
@@ -221,6 +223,15 @@ class Application {
         shelf.refresh();
         for (auto &[k, p] : panels)
             p->post({{"event", "history.changed"}, {"data", Json::object()}});
+    }
+    bool canRestartForUpdate(bool manual) const {
+        if (queuedCapture || capture.active() || shelf.visible() || mainEditing || !pins.empty()) return false;
+        for (const auto &[key, panel] : panels) {
+            if (!panel) continue;
+            if (panel->kind == "editor" || panel->updateDirty || !panel->activityReady()) return false;
+            if (!manual && panel->visible()) return false;
+        }
+        return true;
     }
     void updateSettings(const Json &value) {
         apply(value);
@@ -575,7 +586,21 @@ class Application {
                 aiMessage(p, cmd, v, id);
                 return;
             }
-            if (cmd == "settings.get")
+            if (cmd == "update.activity") {
+                require((p.kind == "main" || p.kind == "settings") && v.at("dirty").is_boolean(),
+                        "当前窗口无法设置编辑状态。");
+                p.updateDirty = v.at("dirty").get<bool>();
+                p.reportedActivity = true;
+            } else if (cmd.rfind("update.", 0) == 0) {
+                require(p.kind == "settings", "请在设置中管理软件更新。");
+                if (cmd == "update.check") updates.checkNow();
+                else if (cmd == "update.apply") updates.apply();
+                else if (cmd == "update.preferences") {
+                    require(v.at("automatic").is_boolean(), "自动更新设置无效。");
+                    updates.preferences(v.at("automatic").get<bool>());
+                } else require(cmd == "update.get", "未知的更新操作。");
+                result = updates.state();
+            } else if (cmd == "settings.get")
                 result = settings;
             else if (cmd == "settings.set") {
                 updateSettings(v);
@@ -657,8 +682,11 @@ class Application {
                         "窗口不存在。");
                 if (area == "editor")
                     editImage(archive.details(v.at("id")));
-                else
-                    open(area);
+                else {
+                    auto panel = open(area);
+                    if (panel && area == "settings" && v.value("pane", "") == "models")
+                        panel->post({{"event", "route"}, {"data", {{"pane", "models"}}}});
+                }
             } else if (cmd == "window.close")
                 close = true;
             else
@@ -710,6 +738,7 @@ class Application {
                 setTrayVisible(settings.value("showTrayIcon", true), true);
                 return 0;
             }
+            if (msg == updater::stateMessage) { updates.receive(); return 0; }
             if (msg == aiReadyMessage) {
                 std::vector<AiReply> replies;
                 {
@@ -757,6 +786,7 @@ class Application {
                 return 0;
             }
             if (msg == WM_TIMER) {
+                if (wp == updater::timer) updates.tick();
                 if (wp == 1)
                     readChange();
                 if (wp == 2 && queuedCapture) {
@@ -767,6 +797,7 @@ class Application {
             }
             if (msg == WM_DESTROY) {
                 exiting = true;
+                updates.stop();
                 {
                     std::lock_guard<std::mutex> guard(aiMail->lock);
                     aiMail->owner = nullptr;
@@ -811,7 +842,7 @@ class Application {
     }
 
   public:
-    int run() {
+    int run(bool background) {
         registerClass(L"CiXiaNativeService", proc);
         root = CreateWindowW(L"CiXiaNativeService", L"词匣服务", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
                              nullptr, instance(), this);
@@ -822,7 +853,12 @@ class Application {
         }
         aiMail->owner = root;
         apply(settings, true);
-        open("main");
+        updates.init(root, [this](const Json &state) {
+            auto it = panels.find("settings");
+            if (it != panels.end() && it->second)
+                it->second->post({{"event", "update.changed"}, {"data", state}});
+        }, [this](bool manual) { return canRestartForUpdate(manual); });
+        if (!background) open("main");
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
             TranslateMessage(&msg);
@@ -831,7 +867,9 @@ class Application {
         return (int)msg.wParam;
     }
 };
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR arguments, int) {
+    HANDLE installing = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\CiXiaDesktopInstalling");
+    if (installing) { CloseHandle(installing); return 0; }
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\CiXiaDesktopMain");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         auto wnd = FindWindowW(L"CiXiaNativeService", nullptr);
@@ -853,7 +891,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     int rc = 1;
     try {
         Application app;
-        rc = app.run();
+        rc = app.run(arguments && wcscmp(arguments, L"--background") == 0);
     } catch (const std::exception &e) {
         MessageBoxW(nullptr, wide(e.what()).c_str(), L"词匣启动失败", MB_OK | MB_ICONERROR);
     }

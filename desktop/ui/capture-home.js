@@ -1,18 +1,26 @@
 (() => {
   'use strict';
-  window.mountCaptureHome = function ({host, desktop, icon, notify}) {
+  window.mountCaptureHome = function ({host, desktop, icon, notify, hotkeys = {}, displayKey}) {
     host.innerHTML = `<section class="capture-home">
-      <header><h1>截图工具</h1><p>框选屏幕区域后可直接编辑，也可切换到滚动长截图。</p></header>
-      <div class="capture-actions">
-        <button class="btn primary" data-action="start">${icon('capture')} 开始截图</button>
-        <button class="btn" data-action="gallery">${icon('pin')} 近期截图库</button>
-        <button class="btn" data-action="import">${icon('image')} 导入图片</button>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+      <div class="page-intro"><header><h1>截图工具</h1><p>框选后可直接复制、保存、置顶，或进入独立编辑窗口。</p></header></div>
+      <div class="capture-launchers">
+        <section class="capture-launch"><span class="capture-symbol">${icon('capture',25)}</span><h2>截取屏幕区域</h2><p>框选后可切换为滚动长截图。</p>
+          <button class="btn primary" data-action="start">${icon('capture',16)}开始截图 <kbd data-key="capture"></kbd></button></section>
+        <section class="capture-launch"><span class="capture-symbol">${icon('pin',24)}</span><h2>置顶参考图</h2><p>从近期截图中选一张或多张，悬浮在其他窗口上方。</p>
+          <button class="btn" data-action="gallery">近期截图库 <kbd data-key="pin"></kbd></button></section>
       </div>
-      <section class="capture-recents"><h2>最近截图</h2><div class="capture-grid"></div></section>
+      <section class="capture-recents"><header><h2>最近截图</h2><button class="btn" data-action="import">${icon('image',15)}导入图片</button></header><div class="capture-grid" aria-live="polite"></div></section>
+      <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
     </section>`;
     const grid = host.querySelector('.capture-grid');
     const picker = host.querySelector('input');
+    function showKeys(keys) {
+      for (const label of host.querySelectorAll('[data-key]')) {
+        const key = keys[label.dataset.key]; label.textContent = displayKey(key); label.hidden = !key;
+      }
+    }
+    showKeys(hotkeys);
+    const stopKeys = desktop.on('settings.changed', value => showKeys(value?.hotkeys || hotkeys));
     let serial = 0;
     async function refresh() {
       const revision = ++serial;
@@ -40,7 +48,10 @@
           return button;
         });
         grid.replaceChildren(...cards);
-        if (!cards.length) grid.textContent = '还没有截图。';
+        if (!cards.length) {
+          const empty = document.createElement('p');
+          empty.className = 'capture-empty'; empty.textContent = '还没有截图。完成截图或导入图片后，可在这里重新打开编辑。'; grid.append(empty);
+        }
       } catch (error) { if (revision === serial && host.isConnected) notify(error.message); }
     }
     async function act(event) {
@@ -70,7 +81,7 @@
     const unsubscribe = desktop.on('history.changed', refresh);
     refresh();
     return () => {
-      serial++; unsubscribe();
+      serial++; unsubscribe(); stopKeys();
       host.removeEventListener('click', act);
       picker.removeEventListener('change', openFile);
     };

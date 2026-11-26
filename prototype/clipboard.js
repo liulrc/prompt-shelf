@@ -130,7 +130,7 @@
     return {type, blob: data, filename: blob.name || '', title: blob.name || '导入的' + typeNames[type], source};
   }
 
-  function openClipboardTool({host, icon, escape, notify, media, openShelf, desktop, shelfShortcut, monitoring}) {
+  function openClipboardTool({host, icon, escape, notify, media, openShelf, desktop, shelfShortcut, displayKey = value => value, monitoring}) {
     const options = {icon, escape, desktop};
     const shortcut = shelfShortcut || (/Mac|iPhone|iPad/.test(navigator.platform) ? '⌥ ⇧ V' : 'Alt + Shift + V');
     const pasteKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ V' : 'Ctrl + V';
@@ -143,7 +143,7 @@
           <div class="cb-buttons"><button class="btn" type="button" data-cb="files">${icon('folder',15)}导入文件</button>
             <button class="btn" type="button" data-cb="read">${icon('plus',15)}读取剪贴板</button></div>
           <input type="file" accept="image/*,video/*,text/*,.txt,.md,.csv" multiple hidden data-cb="file-input">
-          <div class="cb-native"><label><input type="checkbox" role="switch" disabled ${desktop && monitoring ? 'checked' : ''}>跨应用自动记录</label>${desktop ? '<button type="button" class="cb-download" data-cb="settings">前往设置</button>' : '<span>桌面版功能</span>'}</div>
+          <div class="cb-native"><span class="cb-recording" data-on="${Boolean(desktop && monitoring)}">${desktop ? (monitoring ? '自动记录已开启' : '自动记录已暂停') : '跨应用自动记录需桌面版'}</span>${desktop ? '<button type="button" class="cb-download" data-cb="settings">管理记录设置</button>' : ''}</div>
         </section>
         <div class="cb-status" role="status" aria-live="polite"></div>
         <div class="cb-toolbar"><div class="filters" role="group" aria-label="按内容类型筛选">
@@ -369,8 +369,10 @@
     const unsubscribe = media.subscribe(reload);
     function applySettings(settings) {
       if (!current() || !settings?.hotkeys) return;
-      page.querySelector('.cb-native input').checked = !!settings.monitoring;
-      page.querySelector('[data-cb="shelf"] kbd').textContent = settings.hotkeys.shelf;
+      const status = page.querySelector('.cb-recording');
+      status.textContent = settings.monitoring ? '自动记录已开启' : '自动记录已暂停';
+      status.dataset.on = String(!!settings.monitoring);
+      page.querySelector('[data-cb="shelf"] kbd').textContent = displayKey(settings.hotkeys.shelf);
     }
     const unsubscribeSettings = desktop?.on('settings.changed', applySettings);
     if (desktop) desktop.request('settings.get').then(applySettings).catch(error => message(error.message));

@@ -4,16 +4,22 @@
 
 ## 下载安装
 
-| 平台 | 1.3.0 安装包 | 安装方式 |
+| 平台 | 1.4.0 安装包 | 安装方式 |
 | --- | --- | --- |
-| macOS 14 及以上，Apple Silicon / Intel | [下载通用 DMG](https://github.com/liulrc/prompt-shelf/releases/download/v1.3.0/PromptShelf-1.3.0-macOS-universal.dmg) | 打开 DMG，把「词匣」拖入「应用程序」，从那里启动。 |
-| Windows 10 1809 及以上或 Windows 11，x64 | [下载 Setup.exe](https://github.com/liulrc/prompt-shelf/releases/download/v1.3.0/CiXia-1.3.0-Windows-x64-Setup.exe) | 运行安装程序。缺少 WebView2 时，安装器会联网补装。 |
+| macOS 14 及以上，Apple Silicon / Intel | [下载通用 DMG](https://github.com/liulrc/prompt-shelf/releases/download/v1.4.0/PromptShelf-1.4.0-macOS-universal.dmg) | 打开 DMG，把「词匣」拖入「应用程序」，从那里启动。 |
+| Windows 10 1809 及以上或 Windows 11，x64 | [下载 Setup.exe](https://github.com/liulrc/prompt-shelf/releases/download/v1.4.0/CiXia-1.4.0-Windows-x64-Setup.exe) | 运行安装程序。缺少 WebView2 时，安装器会联网补装。 |
 
-升级前请先退出正在运行的词匣。Mac 首次截图需要允许屏幕录制，自动滚动还需允许辅助功能。当前 macOS 包使用临时签名，Windows 包尚无发布者签名。[版本说明与 SHA-256](https://github.com/liulrc/prompt-shelf/releases/tag/v1.3.0) · [安装及 Mac 升级权限说明](docs/桌面版使用说明.md)
+从 1.3.0 或更早版本升级，请先退出正在运行的词匣，再安装一次 1.4.0。Mac 首次截图需要允许屏幕录制，自动滚动还需允许辅助功能。当前 macOS 包使用临时签名，Windows 包尚无发布者签名。[版本说明与 SHA-256](https://github.com/liulrc/prompt-shelf/releases/tag/v1.4.0) · [安装及 Mac 升级权限说明](docs/桌面版使用说明.md)
+
+## 软件更新与新版界面
+
+打开 **设置 → 软件更新 → 检查更新**。发现新版后，可查看版本说明，点击 **更新并重启**，由词匣下载、校验并安装当前平台的正式版。打开 **空闲时自动安装更新** 后，词匣会定期检查并在工作结束后更新。系统可能要求本人确认打开或安装。
+
+工作台将模板列表与使用预览并排显示。常用原文可以直接使用，要改写或拼接时再进入编辑器。设置分为通用、AI 模型、软件更新三个分页。[产品审视、设计参考与下一轮建议](docs/产品审视与改版.md)
 
 ## AI 优化与模板拼接
 
-在「设置 → AI 模型接口」填写兼容 OpenAI 的接口地址和 API 密钥。拉取模型列表后，勾选一个或多个模型并保存。服务未提供模型列表时，可以手动添加模型名。本机免鉴权服务可留空密钥。
+在「设置 → AI 模型」填写兼容 OpenAI 的接口地址和 API 密钥。拉取模型列表后，勾选一个或多个模型并保存。服务未提供模型列表时，可以手动添加模型名。本机免鉴权服务可留空密钥。
 
 在模板空间顶部打开「AI 优化提示词」，输入草稿，选择模型后点「一键优化」。默认生成中文提示词，英文输入也一样。原任务要求写英文邮件时，中文提示词会保留“邮件使用英文”的要求。每个模型的结果单独展示，可复制或转入编辑器。优化时，草稿会发送到你配置的服务。
 
